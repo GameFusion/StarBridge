@@ -153,10 +153,108 @@ def get_refs():
             else:
                 print(f"Warning: Unexpected format in remote refs line: {ref}", flush=True)
 
-    return jsonify({
+    result = {
         "local_refs": local_refs_info,
         "remote_refs": remote_refs_info
-    }), 200
+    }
+
+    return jsonify(result), 200
+
+@app.route('/api/branch', methods=['POST'])
+def get_branches():
+    print("/api/branch", flush=True)
+
+    check_api_key()  # Verify the API key
+
+    data = request.json
+    repo_path = data.get('repo_path')
+
+    # Check if the repository exists
+    if repo_path not in REPOSITORIES:
+        print(f"Repository path '{repo_path}' not found in registered repositories", flush=True)
+        return jsonify({"error": f"Repository path '{repo_path}' not found in registered repositories"}), 400
+
+    # Get local branches
+    try:
+        local_branches = run_git_command(repo_path, [GIT_EXECUTABLE, "-C", repo_path, "branch", "--format", "%(refname:short)"])
+    except subprocess.CalledProcessError as e:
+        print(f"Failed to retrieve local branches: {e}", flush=True)
+        return jsonify({"error": f"Failed to retrieve local branches: {e}"}), 500
+
+    # Parse local branches
+    local_branches_info = []
+    for branch in local_branches.splitlines():
+        if branch.strip():
+            local_branches_info.append({
+                "name": branch.strip()
+            })
+
+    # Get remote branches
+    try:
+        remote_branches = run_git_command(repo_path, [GIT_EXECUTABLE, "-C", repo_path, "branch", "-r", "--format", "%(refname:short)"])
+    except subprocess.CalledProcessError as e:
+        print(f"Failed to retrieve remote branches: {e}", flush=True)
+        return jsonify({"error": f"Failed to retrieve remote branches: {e}"}), 500
+
+    # Parse remote branches
+    remote_branches_info = []
+    for branch in remote_branches.splitlines():
+        if branch.strip():
+            remote_branches_info.append({
+                "name": branch.strip()
+            })
+
+    result = {
+        "local_branches": local_branches_info,
+        "remote_branches": remote_branches_info
+    }
+
+    print("return ", result, flush=True)
+    # Return the branch information
+    return jsonify(result), 200
+
+
+@app.route('/api/remotes', methods=['POST'])
+def get_remotes():
+    print("/api/remotes", flush=True)
+
+    check_api_key()  # Verify the API key
+
+    data = request.json
+    repo_path = data.get('repo_path')
+
+    # Check if the repository exists
+    if repo_path not in REPOSITORIES:
+        return jsonify({"error": f"Repository path '{repo_path}' not found in registered repositories"}), 400
+
+    # Get list of remotes
+    try:
+        remotes = run_git_command(repo_path, [GIT_EXECUTABLE, "-C", repo_path, "remote", "-v"])
+    except subprocess.CalledProcessError as e:
+        return jsonify({"error": f"Failed to retrieve remotes: {e}"}), 500
+
+    # Parse remote information
+    remotes_info = []
+    for line in remotes.splitlines():
+        if line.strip():  # Ensure the line is not empty
+            parts = line.split()
+            if len(parts) >= 2:  # Expected format: <name> <url> (fetch/push)
+                remote_name, remote_url = parts[0], parts[1]
+                remote_type = parts[2].strip("()") if len(parts) > 2 else "unknown"
+                
+                # Append remote information to the list
+                remotes_info.append({
+                    "name": remote_name,
+                    "url": remote_url,
+                    "type": remote_type
+                })
+
+    # Return remote information
+    result = {
+        "remotes": remotes_info
+    }
+    print("result", result, flush=True)
+    return jsonify(result), 200
 
 @app.route('/api/revwalk', methods=['POST'])
 def rev_walk():
@@ -220,7 +318,7 @@ def rev_walk():
         }
         commit_list.append(commit_info)
 
-    print("commits", commit_list, flush=True)
+    #print("commits", commit_list, flush=True)
     return jsonify({"commits": commit_list}), 200
 
 @app.route('/api/diff', methods=['POST'])
@@ -989,23 +1087,25 @@ def initiate_push():
     client_head_commit = data.get('head_commit')
     client_remote_commit = data.get('remote_commit')
 
-    print("client_head_commit", client_head_commit)
-    print("client_remote_commit", client_remote_commit)
+    print("client_head_commit", client_head_commit, flush=True)
+    print("client_remote_commit", client_remote_commit, flush=True)
 
     # Get the current branch HEAD commit
     local_head_commit = get_commit_hash(repo_path, f'.git/refs/heads/{branch}')
+    new_branch = False
     print("local_head_commit", local_head_commit)
     if local_head_commit is None:
-        return jsonify({"error": f"Local branch '{branch}' does not exist."}), 404
-
+        print(f"Local branch '{branch}' does not exist, creating new branch.", flush=True)
+        #return jsonify({"error": f"Local branch '{branch}' does not exist."}), 404
+    
     # Verify that the local head commit and client remote commit are the same
-    if client_remote_commit != local_head_commit:
+    elif client_remote_commit != local_head_commit:
         return jsonify({"error": "Your local branch is out of date. Please pull the latest changes before pushing."}), 409
 
-    # Verify if the client is up to date
-    print(f"Client head commit: {client_remote_commit}, Local head commit: {local_head_commit}")
-    if client_head_commit == local_head_commit:
-        return jsonify({"error": "Already up to date. Nothing to pull."}), 409
+        # Verify if the client is up to date
+        print(f"Client head commit: {client_remote_commit}, Local head commit: {local_head_commit}")
+        if client_head_commit == local_head_commit:
+            return jsonify({"error": "Already up to date. Nothing to pull."}), 409
 
 
     # Validate the repository
@@ -1268,24 +1368,37 @@ def update_ref():
     # Define the path to heads/master
     heads_master_path = os.path.join(repo_path, f'.git/refs/heads/{branch}')
 
+    # Extract the directory portion of the path (exclude the file)
+    directory = os.path.dirname(heads_master_path)
+
+    # Check if the directory exists, and if not, create it
+    if not os.path.exists(directory):
+        print("Directory not found, creating new branch ref...", flush=True)
+        os.makedirs(directory)  # This will create all necessary parent di
+
     # Check if the heads/master file exists
     if not os.path.exists(heads_master_path):
-        return jsonify({"error": "heads/master not found"}), 404
+        print("heads/master not found, creating new branch ref", flush=True)
+        #return jsonify({"error": "heads/master not found"}), 404
 
     # Update heads/master with the new commit ID
     try:
         # Read the current commit ID from heads/{branch}
-        with open(heads_master_path, 'r') as f:
-            current_commit_id = f.read().strip()
+        if os.path.exists(heads_master_path):
+            print("Reading heads/master", flush=True)
+            with open(heads_master_path, 'r') as f:
+                current_commit_id = f.read().strip()
 
-        # Check if the current commit ID is already up to date
-        if current_commit_id == commit_id:
-            print(f"{branch} is already up to date with commit {commit_id}")
-            return jsonify({"message": f"{branch} is already up to date", "commit_id": commit_id}), 200
+            # Check if the current commit ID is already up to date
+            if current_commit_id == commit_id:
+                print(f"{branch} is already up to date with commit {commit_id}")
+                return jsonify({"message": f"{branch} is already up to date", "commit_id": commit_id}), 200
 
+        print("writeing to head path:", heads_master_path, flush=True)
+        print("commit id", commit_id, flush=True)
         with open(heads_master_path, 'w') as f:
             f.write(commit_id + '\n')
-        print(f"Updated {branch} from {current_commit_id} to {commit_id}")
+        print(f"Updated {branch} from {current_commit_id} to {commit_id}", flush=True)
 
         return jsonify({
             "message": f"Reference updated successfully for {branch}",
