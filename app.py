@@ -1,5 +1,5 @@
 
-from flask import Flask, request, jsonify, abort
+from flask import Flask, request, jsonify, abort, make_response, send_file
 import os
 #import git
 #git.refresh('/usr/bin/git')  # Replace with the actual path to git if different
@@ -42,12 +42,33 @@ VALID_API_KEYS = {"user123": "your_secure_api_key_here"}
 # API key check that aborts if the key is invalid (no return to parent function)
 def check_api_key():
     print("check_api_key", flush=True)
+    print("request.headers", request.headers, flush=True)
     xapi = request.headers.get('x-api-key')
+
+
+    try:
+        xapi = request.headers.get('x-api-key')
+
+    except ValueError as e:
+        # Log the error for debugging
+        print(f"Error: {e}", flush=True)
+        # Respond with a clear error message
+        abort(401, description="Starbridge passphrase is missing. Please define it on the client.")
+
+    except Exception as e:
+        print(f"Unexpected error: {e}")
+        abort(401, description="Unauthorized access, unexpected X API key")
+        return jsonify({"error": "An unexpected error occurred"}), 500
+
+
+
     auth = request.headers.get('Authorization')
     if xapi:
+        print("found xapi", flush=True)
         if xapi not in VALID_API_KEYS.values():
             print("Invalid key", flush=True)
             abort(401, description="Unauthorized access, invalid API key")
+        print("found valid x-api-key", flush=True)
     elif auth:
         print("found Authorization:", auth, flush=True)
         headers = {
@@ -125,6 +146,7 @@ def get_refs():
         return jsonify({"error": f"Repository path '{repo_path}' not found in registered repositories"}), 400
 
     # Get local refs
+    print("run 1", flush=True)
     local_refs = run_git_command(repo_path, [GIT_EXECUTABLE, "-C", repo_path, "show-ref"])
     local_refs_info = []
     
@@ -136,9 +158,12 @@ def get_refs():
                 "sha": sha
             })
 
+    print("run 2", flush=True)
     # Get remote refs
-    remote_refs = run_git_command(repo_path, [GIT_EXECUTABLE, "-C", repo_path, "ls-remote", "origin"])
+    remote_refs = run_git_command(repo_path, [GIT_EXECUTABLE, "-C", repo_path, "ls-remote"])
     remote_refs_info = []
+    
+    print("remote_refs", remote_refs, flush=True)
     
     for ref in remote_refs.splitlines():
         if ref.strip():  # Check if the line is not empty
@@ -675,6 +700,94 @@ def pull():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+@app.route('/api/pull/object', methods=['GET'])
+def pull_object():
+    print("/api/pull/object", flush=True)
+
+    # Verify API key
+    check_api_key()
+
+    # Get the repository path from headers
+    repo_path = request.headers.get('Repo-Path')
+    print("repo_path", repo_path, flush=True)
+    if not repo_path:
+        print("Repository path is required", flush=True)
+        return jsonify({"error": "Repository path is required"}), 400
+
+    # Validate repository
+    if repo_path not in REPOSITORIES:
+        print(f"Repository path '{repo_path}' not found in registered repositories", flush=True)
+        return jsonify({"error": f"Repository path '{repo_path}' not found in registered repositories"}), 400
+
+    # Verify session ID
+    #session_id = request.headers.get('Session-ID')
+    #if not session_id:
+    #    return jsonify({"error": "Session ID is required"}), 400
+
+    # Define lock path and validate the session
+    #local_lock_path = os.path.join(repo_path, '.git/refs/heads/pull.lock')
+    #if not lock_exists(local_lock_path) or not validate_lock(local_lock_path, session_id):
+    #    return jsonify({"error": "Invalid or missing session lock for this repository"}), 403
+
+    # Get the file path from the header
+    file_path = request.headers.get('File-Path')
+    print("file_path", file_path, flush=True)
+    if not file_path:
+        return jsonify({"error": "File path is required"}), 400
+
+    object_file_path = os.path.join(repo_path, '.git/objects', file_path)
+    print("object_file_path", object_file_path, flush=True)
+    if not os.path.isfile(object_file_path):
+        return jsonify({"error": f"The file '{file_path}' does not exist on the server"}), 404
+
+    # Parse the Range header for partial content requests
+    range_header = request.headers.get('Range')
+    if not range_header:
+        return jsonify({"error": "Range header is required"}), 400
+
+    # Extract start and end bytes from the Range header
+    try:
+        range_match = re.match(r"bytes=(\d+)-(\d*)", range_header)
+        if not range_match:
+            return jsonify({"error": "Invalid Range header format"}), 400
+
+        start_byte = int(range_match.group(1))
+        end_byte = int(range_match.group(2)) if range_match.group(2) else None
+
+    except ValueError:
+        return jsonify({"error": "Invalid byte range specified"}), 400
+
+    # Get the file size and adjust end_byte if it's None
+    file_size = os.path.getsize(object_file_path)
+    if end_byte is None or end_byte >= file_size:
+        end_byte = file_size - 1
+
+    if start_byte >= file_size:
+        return jsonify({"error": "Requested range is not satisfiable"}), 416
+
+    # Calculate the number of bytes to read
+    chunk_size = end_byte - start_byte + 1
+
+    # Open file and read the requested byte range
+    try:
+        with open(object_file_path, 'rb') as file:
+            file.seek(start_byte)
+            data = file.read(chunk_size)
+
+        # Set up response with partial content
+        response = make_response(data)
+        response.status_code = 206  # HTTP 206 Partial Content
+        response.headers['Content-Type'] = 'application/octet-stream'
+        response.headers['Content-Range'] = f"bytes {start_byte}-{end_byte}/{file_size}"
+        response.headers['Content-Length'] = str(chunk_size)
+
+        print(f"Serving bytes {start_byte}-{end_byte} of '{file_path}'", flush=True)
+        return response
+
+    except Exception as e:
+        print(f"Error reading object file: {e}", flush=True)
+        return jsonify({"error": "Failed to read the object file"}), 500
+
 @app.route('/api/local-path', methods=['POST'])
 def repo_path():
     """
@@ -940,11 +1053,43 @@ def list_directory_content(path, options, exclusion_patterns=None):
             result.append(file)
     return result
 
+@app.route('/api/object/info', methods=['POST'])
+def get_object_info():
+
+    print("/api/object/info", flush=True)
+    check_api_key()
+
+    data = request.json
+    repo_path = data.get('repo_path')
+    object_file = data.get('object_file')
+
+    # Build the full path to the object file
+    file_path = os.path.join(repo_path, ".git", "objects", object_file)
+
+    # Initialize a dictionary to store file information
+    file_info = {}
+
+    try:
+        # Get file info if it exists
+        if os.path.isfile(file_path):
+            file_info = {
+                "file_name": os.path.basename(file_path),
+                "size_in_bytes": os.path.getsize(file_path),
+                "file_path": file_path
+            }
+        else:
+            return jsonify({"error": "File does not exist"}), 404
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+    return jsonify(file_info), 200
+
 @app.route('/api/objects', methods=['POST'])
-def list_git_objects():
+def list_object_files():
 
     print("/api/objects", flush=True)
     check_api_key()
+    print("check api key ok", flush=True)
 
     data = request.json
     repo_path = data.get('repo_path')
@@ -1040,15 +1185,7 @@ def lock_exists(lock_path):
     return os.path.exists(lock_path)
 
 # Helper function to create a lock file with JSON content
-def create_lock(lock_path, client_id, session_id):
-    # Prepare lock content
-    lock_content = {
-        "creation_time": time.strftime('%Y-%m-%d %H:%M:%S', time.localtime()),
-        "last_update": time.strftime('%Y-%m-%d %H:%M:%S', time.localtime()),
-        "client_id": client_id,
-        "session_id": session_id
-    }
-
+def create_lock(lock_path, lock_content):
     # Write the lock content to a .lock file
     try:
         with open(lock_path, 'w') as lock_file:
@@ -1090,6 +1227,18 @@ def initiate_push():
     print("client_head_commit", client_head_commit, flush=True)
     print("client_remote_commit", client_remote_commit, flush=True)
 
+    lock_content = {
+        "creation_time": time.strftime('%Y-%m-%d %H:%M:%S', time.localtime()),
+        "last_update": time.strftime('%Y-%m-%d %H:%M:%S', time.localtime()),
+        "client_id": client_id,
+        "session_id": session_id
+    }
+
+    if client_head_commit:
+        lock_content['client_head_commit'] = client_head_commit
+    if client_remote_commit:
+        lock_content['client_remote_commit'] = client_remote_commit
+
     # Get the current branch HEAD commit
     local_head_commit = get_commit_hash(repo_path, f'.git/refs/heads/{branch}')
     new_branch = False
@@ -1106,14 +1255,15 @@ def initiate_push():
         print(f"Client head commit: {client_remote_commit}, Local head commit: {local_head_commit}")
         if client_head_commit == local_head_commit:
             return jsonify({"error": "Already up to date. Nothing to pull."}), 409
-
+    else:
+        lock_content['local_head_commit'] = local_head_commit
 
     # Validate the repository
     if repo_path not in REPOSITORIES:
         return jsonify({"error": f"Repository '{repo_name}' not found"}), 400
 
     # Define lock paths
-    local_lock_path = os.path.join(repo_path, '.git/refs/heads/push.lock')
+    local_lock_path = os.path.join(repo_path, f'.git/refs/heads/{branch}.lock')
     remote_lock_path = os.path.join(repo_path, '.git/refs/remotes/push.lock')
 
     # Check for existing locks
@@ -1122,14 +1272,19 @@ def initiate_push():
 
     # Create local lock (if local refs exist)
     local_heads_path = os.path.join(repo_path, '.git/refs/heads')
+    # Create the directory if it does not exist
+    #os.makedirs(local_heads_path, exist_ok=True)
     if os.path.exists(local_heads_path):
-        if not create_lock(local_lock_path, client_id, session_id):
+        lock_content['local_heads_path'] = local_heads_path
+        if not create_lock(local_lock_path, lock_content):
             return jsonify({"error": "Failed to create local lock"}), 500
 
     # Create remote lock (if remote refs exist)
     remote_heads_path = os.path.join(repo_path, '.git/refs/remotes')
+    os.makedirs(remote_heads_path, exist_ok=True)
     if os.path.exists(remote_heads_path):
-        if not create_lock(remote_lock_path, client_id, session_id):
+        lock_content['remote_heads_path'] = remote_heads_path
+        if not create_lock(remote_lock_path, lock_content):
             return jsonify({"error": "Failed to create remote lock"}), 500
 
     print("Initiated push with session id;", session_id)
@@ -1154,11 +1309,11 @@ def remove_lock(lock_path):
     try:
         if os.path.exists(lock_path):
             os.remove(lock_path)
-            print(f"Removed lock at {lock_path}")
+            print(f"Removed lock at {lock_path}", flush=True)
             return True
         return False
     except Exception as e:
-        print(f"Failed to remove lock at {lock_path}: {e}")
+        print(f"Failed to remove lock at {lock_path}: {e}", flush=True)
         return False
 
 def is_bare_repository(repo_path):
@@ -1173,17 +1328,18 @@ def reset_branch(repo_path, branch):
 
     Returns a JSON response indicating success or failure.
     """
+    print("reset_branch", flush=True)
     # Check if the repository is bare or non-bare
 
     if is_bare_repository(repo_path):
-        return {"reset_message": "No reset needed for bare repository."}, 200
+        return {"message": "No need to reset bare repository."}, 200
 
     git_dir = os.path.join(repo_path, ".git")
 
     # If non-bare, check if the branch is the current branch in the working directory
     head_file_path = os.path.join(git_dir, "HEAD")
     if not os.path.exists(head_file_path):
-        print("HEAD file not found")
+        print("HEAD file not found", flush=True)
         return {"error": "HEAD file not found, unable to reset"}, 404
 
     # Determine the current branch (if not bare)
@@ -1193,24 +1349,24 @@ def reset_branch(repo_path, branch):
     # Example format of HEAD: "ref: refs/heads/master"
     if head_content.startswith("ref: "):
         current_branch = head_content.split("/")[-1]  # Extract branch name from HEAD
-        print(f"Current branch: {current_branch}")
+        print(f"Current branch: {current_branch}", flush=True)
     else:
         current_branch = None
-        print(f"HEAD is detached, current commit is {head_content}")
+        print(f"HEAD is detached, current commit is {head_content}", flush=True)
 
     # Only reset if this is a non-bare repo and the branch matches the current branch
     if current_branch and branch == current_branch:
         try:
-            print(f"Resetting branch {branch} in non-bare repository at {repo_path} to match the latest pushed commit.")
+            print(f"Resetting branch {branch} in non-bare repository at {repo_path} to match the latest pushed commit.", flush=True)
 
             # Perform git reset --hard using the git binary
             result = subprocess.run(['git', 'reset', '--hard'], cwd=repo_path, capture_output=True, text=True)
 
             if result.returncode != 0:
-                print(f"Error during git reset --hard: {result.stderr}")
+                print(f"Error during git reset --hard: {result.stderr}", flush=True)
                 return {"error": f"Failed to reset branch: {result.stderr}"}, 500
 
-            print(f"Branch {branch} successfully reset --hard.")
+            print(f"Branch {branch} successfully reset --hard.", flush=True)
             return {"message": f"Push completed. Branch {branch} reset --hard to the latest commit."}, 200
 
         except Exception as e:
@@ -1235,10 +1391,10 @@ def stop_push():
 
     # Validate the repository
     if repo_path not in REPOSITORIES:
-        return jsonify({"error": f"Repository '{repo_name}' not found"}), 400
+        return jsonify({"error": f"Repository '{repo_path}' not found"}), 400
 
     # Define lock paths
-    local_lock_path = os.path.join(repo_path, '.git/refs/heads/push.lock')
+    local_lock_path = os.path.join(repo_path, f'.git/refs/heads/{branch}.lock')
     remote_lock_path = os.path.join(repo_path, '.git/refs/remotes/push.lock')
 
     # Validate and remove the local lock if it exists
@@ -1247,36 +1403,78 @@ def stop_push():
         if not validate_lock(local_lock_path, session_id):
             print(f"error: Invalid session ID {session_id} for local lock")
             return jsonify({"error": "Invalid session ID for local lock"}), 403
-        if not remove_lock(local_lock_path):
-            print(f"error: Failed to remove local lock file {local_lock_path}")
-            return jsonify({"error": "Failed to remove local lock"}), 500
 
     # Validate and remove the remote lock if it exists
     if lock_exists(remote_lock_path):
         if not validate_lock(remote_lock_path, session_id):
             print(f"error: Invalid session ID {session_id} for remote lock")
             return jsonify({"error": "Invalid session ID for remote lock"}), 403
-        if not remove_lock(remote_lock_path):
-            print(f"error: Failed to remove remote lock file {local_lock_path}")
-            return jsonify({"error": "Failed to remove remote lock"}), 500
 
+    
+    workdir_branch = run_git_command(repo_path, [GIT_EXECUTABLE, "-C", repo_path, "branch", "--show-current"])
+    print("workdir_branch", workdir_branch, flush=True)
 
-     # Attempt to reset the branch if needed
-    reset_response, reset_status = reset_branch(repo_path, branch)
+    # Define the paths
+    head_path = os.path.join(repo_path, '.git', 'HEAD')
 
-    # If there's an error from resetting the branch, include it in the final response
-    if reset_status != 200:
-        return jsonify({
-            "message": "Push completed with reset errors.",
-            "session_id": session_id,
-            "reset_error": reset_response["error"]
-        }), reset_status
+    # Check if .git/HEAD exists
+    if not os.path.exists(head_path):
+        # Create .git/HEAD and write the reference to the specified branch
+        branch_ref = f"ref: refs/heads/{branch}\n"
+        with open(head_path, 'w') as head_file:
+            head_file.write(branch_ref)
+        print(f"Created .git/HEAD pointing to branch '{branch}'")
+    else:
+        print(".git/HEAD already exists")
+
+    if lock_exists(local_lock_path):
+        if not remove_lock(local_lock_path):
+            print(f"error: Failed to remove local lock file {local_lock_path}")
+            return jsonify({"error": "Failed to remove local lock"}), 500
+    
+    checkout = None
+    reset_response = None
+    if workdir_branch != branch:
+        # git checkout branch
+        if workdir_branch:
+            print(f"checking out target branch in workdir {workdir_branch}->{branch}", flush=True)
+        else:
+            print("checking out workdir to branch {branch}", flush=True)
+        checkout = run_git_command(repo_path, [GIT_EXECUTABLE, "-C", repo_path, "checkout", branch])
+        print("checkout", checkout, flush=True)
+        if checkout.startswith("Error"):
+            print("found error in checkout:", checkout)
+            return jsonify({
+                "checkout_message": checkout,
+                "message": "Checkout error:" + checkout,
+                "session_id": session_id,
+                "Checkout error": checkout
+            }), 500
+    else:
+        # Attempt to reset the branch if needed
+        reset_response, reset_status = reset_branch(repo_path, branch)
+
+        # If there's an error from resetting the branch, include it in the final response
+        if reset_status != 200:
+            return jsonify({
+                "message": "Push completed with reset errors.",
+                "session_id": session_id,
+                "reset_error": reset_response["error"]
+            }), reset_status
 
     # If both locks are removed successfully
+
+    if not remove_lock(remote_lock_path):
+        print(f"error: Failed to remove remote lock file {remote_lock_path}")
+        return jsonify({"error": "Failed to remove remote lock"}), 500
+    
+    reset_message = reset_response.get("message") if reset_response else "No reset message"
+    print("Push completed and locks removed successfully for repo {repo_path} session id {session_id}", flush=True)
     return jsonify({
         "message": "Push completed and locks removed successfully",
         "session_id": session_id,
-        "reset_message": reset_response.get("message")
+        "reset_message": reset_message,
+        "checkout_message": checkout
     }), 200
 
 
@@ -1291,7 +1489,7 @@ def push_object():
     #print("headers", request.headers)
 
     repo_path = request.headers.get('Repo-Path')
-    print("repo_path", repo_path)
+    print("repo_path", repo_path, flush=True)
 
     # Validate repository
     if repo_path not in REPOSITORIES:
@@ -1299,26 +1497,33 @@ def push_object():
 
     # Verify session ID
     session_id = request.headers.get('Session-ID')
-    print("session_id", session_id)
+    print("session_id", session_id, flush=True)
     if not session_id:
         return jsonify({"error": "Session ID is required"}), 400
 
     # Define lock paths
-    local_lock_path = os.path.join(repo_path, '.git/refs/heads/push.lock')
+    local_lock_path = os.path.join(repo_path, '.git/refs/remotes/push.lock')
 
     # Check for existing locks
     if not lock_exists(local_lock_path):
         # Return error message if the lock for a valid push session is missing
+        print(f"Missing lock for valid push session on {local_lock_path}.", flush=True)
         return jsonify({"error": f"Missing lock for valid push session on {local_lock_path}."}), 404
-
+    print("found session lock file")
     if not validate_lock(local_lock_path, session_id):
-        print(f"error: Invalid session ID {session_id} for local lock")
+        print(f"error: Invalid session ID {session_id} for local lock", flush=True)
         return jsonify({"error": "Invalid session ID for local lock"}), 403
-
+    print("session is valid", flush=True)
     # Get the file path from the header
     file_path = request.headers.get('File-Path')
+    
     if not file_path:
+        print("File path is required", flush=True)
         return jsonify({"error": "File path is required"}), 400
+    print("file_path", file_path, flush=True)
+    # Get the upload mode from the header
+    upload_mode = request.headers.get('Upload-Mode', 'full')  # Default to 'full' if not provided
+    print("Upload mode:", upload_mode, flush=True)
 
     # Read the binary data from the request
     binary_data = request.data
@@ -1326,19 +1531,37 @@ def push_object():
     # Save the object to a file
     object_file_path = os.path.join(repo_path, '.git/objects', file_path)
 
-    print("Recieving file path", object_file_path)
+    print("Recieving file path", object_file_path, flush=True)
     #return jsonify({"message": "Object pushed successfully", "file_path": object_file_path}), 200
 
     try:
         # Create the directory if it doesn't exist
         os.makedirs(os.path.dirname(object_file_path), exist_ok=True)
 
-        # Write the binary data to a file
-        with open(object_file_path, 'wb') as obj_file:
-            obj_file.write(binary_data)
+        # Determine write mode based on upload mode
+        if upload_mode == 'start':
+            # Create or overwrite the file for the initial chunk
+            with open(object_file_path, 'wb') as obj_file:
+                obj_file.write(binary_data)
+            print(f"File started: {object_file_path}", flush=True)
 
-        print(f"Object saved to {object_file_path}")
+        elif upload_mode == 'append':
+            # Append to the file for subsequent chunks
+            with open(object_file_path, 'ab') as obj_file:
+                obj_file.write(binary_data)
+            print(f"Data appended to: {object_file_path}", flush=True)
 
+        elif upload_mode == 'full':
+            # Write the full file in one go
+            with open(object_file_path, 'wb') as obj_file:
+                obj_file.write(binary_data)
+            print(f"Full file uploaded: {object_file_path}", flush=True)
+
+        else:
+            print("Invalid upload mode specified", flush=True)
+            return jsonify({"error": "Invalid upload mode specified"}), 400
+
+        print("Object pushed successfully", "file_path:", object_file_path, flush=True)
         return jsonify({"message": "Object pushed successfully", "file_path": object_file_path}), 200
 
     except Exception as e:
@@ -1356,32 +1579,33 @@ def update_ref():
     repo_path = data.get('repo_path')   # The repository path
     session_id = data.get('session_id')  # Validate the session ID
     branch = data.get('branch')
-    print("branch", branch)
+    print("branch", branch, flush=True)
     # Validate session
     # Define lock paths
-    local_lock_path = os.path.join(repo_path, '.git/refs/heads/push.lock')
+    local_lock_path = os.path.join(repo_path, '.git/refs/remotes/push.lock')
     is_valid, error_message = validate_session(local_lock_path, session_id)
     if not is_valid:
-        print(f"error: {error_message}")
+        print(f"error: {error_message}", flush=True)
         return jsonify({"error": error_message}), 403 if "Invalid session" in error_message else 404
 
     # Define the path to heads/master
     heads_master_path = os.path.join(repo_path, f'.git/refs/heads/{branch}')
-
+    print("heads_master_path", heads_master_path, flush=True)
     # Extract the directory portion of the path (exclude the file)
     directory = os.path.dirname(heads_master_path)
-
+    print("directory", directory, flush=True)
     # Check if the directory exists, and if not, create it
     if not os.path.exists(directory):
-        print("Directory not found, creating new branch ref...", flush=True)
+        print("Directory not found, creating new branch ref directory {directory}...", flush=True)
         os.makedirs(directory)  # This will create all necessary parent di
 
     # Check if the heads/master file exists
     if not os.path.exists(heads_master_path):
-        print("heads/master not found, creating new branch ref", flush=True)
+        print(f"heads/{branch} not found, creating new branch ref", flush=True)
         #return jsonify({"error": "heads/master not found"}), 404
 
     # Update heads/master with the new commit ID
+    current_commit_id = None
     try:
         # Read the current commit ID from heads/{branch}
         if os.path.exists(heads_master_path):
@@ -1398,13 +1622,20 @@ def update_ref():
         print("commit id", commit_id, flush=True)
         with open(heads_master_path, 'w') as f:
             f.write(commit_id + '\n')
-        print(f"Updated {branch} from {current_commit_id} to {commit_id}", flush=True)
-
-        return jsonify({
+        
+        result = {
             "message": f"Reference updated successfully for {branch}",
             "from_commit_id": current_commit_id,
             "to_commit_id": commit_id
-        }), 200
+        }
+        if current_commit_id:
+            print(f"Updated {branch} from {current_commit_id} to {commit_id}", flush=True)
+            result["message"] = f"Reference updated successfully for {branch} from {current_commit_id} to {commit_id}"
+        else:
+            print(f"Created new branch ref {branch} set to commit {commit_id}", flush=True)
+            result["message"] = f"Created new branch successfully for {branch} set to {commit_id}"
+
+        return jsonify(result), 200
 
     except Exception as e:
         print(f"Error updating heads/master: {e}")
