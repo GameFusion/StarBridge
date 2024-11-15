@@ -1,0 +1,13 @@
+[Unit]
+Description=StarBridge Service
+After=network.target
+
+[Service]
+User=root
+Group=root
+WorkingDirectory=/root/StarBridge
+Environment="PATH=/root/StarBridge/venv/bin"
+ExecStart=/root/StarBridge/venv/bin/gunicorn -b 0.0.0.0:5001 --timeout 100 app:app
+
+[Install]
+WantedBy=multi-user.target

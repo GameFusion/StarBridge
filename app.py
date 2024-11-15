@@ -1432,6 +1432,11 @@ def stop_push():
             print(f"error: Failed to remove local lock file {local_lock_path}")
             return jsonify({"error": "Failed to remove local lock"}), 500
     
+
+def hello():
+    print("my life is beautifull");
+
+
     checkout = None
     reset_response = None
     if workdir_branch != branch:
