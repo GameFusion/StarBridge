@@ -1,0 +1,13 @@
+{
+    "git_executable": "/usr/bin/git",
+    "repositories": [
+        "/path/repo1",
+        "/path/repo2",
+        "/path/repo3",
+        "/path/repo4"
+    ],
+    "ssl": {
+        "cert_path": "/etc/letsencrypt/live/mydomain.com/fullchain.pem",
+        "key_path": "/etc/letsencrypt/live/mydomain.com/privkey.pem"
+    }
+}
