@@ -499,7 +499,7 @@ def git_pull():
     Perform a git pull operation on the specified repository.
     """
 
-    
+
     print("/api/pull", flush=True)
 
     # Verify API key (if implemented in your application)
@@ -508,10 +508,15 @@ def git_pull():
     # Parse request data
     data = request.json
     repo_path = data.get('repo_path')
+    pull_mode = data.get('pull_mode')
 
     # Validate input
     if not repo_path:
         return jsonify({"error": "'repo_path' is required"}), 400
+    
+    # Validate input
+    if not pull_mode:
+        return jsonify({"error": "'pull_mode' is required"}), 400
 
     if repo_path not in REPOSITORIES:
         return jsonify({"error": f"Repository path '{repo_path}' not found in registered repositories"}), 400
@@ -519,7 +524,7 @@ def git_pull():
     # Run git pull command
     try:
         print(f"Running git pull for repository at {repo_path}...", flush=True)
-        pull_result = run_git_command(repo_path, [GIT_EXECUTABLE, "-C", repo_path, "pull"])
+        pull_result = run_git_command(repo_path, [GIT_EXECUTABLE, "-C", repo_path, "pull", pull_mode])
         print(f"Git pull output: {pull_result}", flush=True)
 
         return jsonify({
