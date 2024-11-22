@@ -488,8 +488,11 @@ def push():
     data = request.json
     repo_path = data.get('repo_path')
     branch = data.get('branch', 'master')  # Default to 'main' if branch is not specified
+    remote = data.get('remote', 'origin') # Default to 'origin' if remote is not specified
 
     print("data", data, flush=True)
+    print("branch", branch, flush=True)
+    print("remote", remote, flush=True)
 
     if repo_path not in REPOSITORIES:
         return jsonify({"error": f"Repository path '{repo_path}' not found in registered repositories"}), 400
@@ -499,7 +502,7 @@ def push():
     try:
         print("try to push", flush=True)
         # Prepare the git push command
-        git_push_command = [GIT_EXECUTABLE, "-C", repo_path, "push", "origin", branch]
+        git_push_command = [GIT_EXECUTABLE, "-C", repo_path, "push", remote, branch]
 
         # Run the git push command
         result = subprocess.run(git_push_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
