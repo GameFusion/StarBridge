@@ -1061,9 +1061,11 @@ def list_repositories():
 
             # Parse the remote information to get the URL
             remote_url = None
+            remote_name = None
             if remote:
                 remote_lines = remote.splitlines()
                 remote_url = remote_lines[0].split()[1] if remote_lines else None
+                remote_name = remote_lines[0].split()[0] if remote_lines else None
 
             # Append the repository information to the list
             repositories.append({
@@ -1073,7 +1075,8 @@ def list_repositories():
                 "action_status": action_status,
                 "branch": branch['branch'],
                 "status_message": branch['status_message'],
-                "remote": remote_url
+                "remote": remote_url,
+                "remote_name": remote_name
             })
 
         # Construct the response
