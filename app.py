@@ -13,6 +13,8 @@ import json
 import requests
 import logging
 from logging.handlers import RotatingFileHandler
+import threading
+import psutil
 
 # Configure logging
 logging.basicConfig(
@@ -40,7 +42,10 @@ REPOSITORIES = settings["repositories"]
 CERT_PATH = settings['ssl']['cert_path']
 KEY_PATH = settings['ssl']['key_path']
 STARGIT_URL = "https://stargit.com/api/tokens/validate"
-
+STARGIT_REGISTRATION_ENDPOINT = "https://stargit.com/api/servers/register"
+ENABLE_STARGIT_REGISTRATION = os.getenv('ENABLE_STARGIT_REGISTRATION', 'false').lower() == 'true'
+STARGIT_API_KEY = os.getenv('STARGIT_API_KEY', '')
+STARBRIDGE_SERVER_ID = os.getenv('STARBRIDGE_SERVER_ID', str(uuid.uuid4()))  # Unique server ID
 SSL_MODE = os.getenv('SSL_MODE', 'none').lower()
 
 # Load the API key from environment variable
@@ -1657,7 +1662,67 @@ def update_ref():
         logger.error("Failed to update reference for %s: %s", branch, str(e))
         return jsonify({"error": "Failed to update reference"}), 500
 
-# Ensure to add the necessary logic to verify API keys and maintain your repository list
+def collect_server_metrics():
+    """Collect basic server metrics for registration."""
+    try:
+        uptime = time.time() - psutil.boot_time()
+        cpu_percent = psutil.cpu_percent(interval=1)
+        memory = psutil.virtual_memory()
+        stats = {
+            "uptime_seconds": uptime,
+            "cpu_percent": cpu_percent,
+            "memory_percent": memory.percent,
+            "repo_count": len(REPOSITORIES),
+            "version": "1.0.0"  # Replace with __version__ or similar
+        }
+        print("Collected server metrics:", stats, flush=True)
+        return stats
+    except Exception as e:
+        logger.error("Failed to collect server metrics: %s", str(e))
+        return {}
+
+def register_with_stargit(event_type='heartbeat'):
+    """Send registration or heartbeat to stargit.com."""
+    logger.debug(f"Registering with stargit.com, event_type={event_type}")
+    if not ENABLE_STARGIT_REGISTRATION:
+        logger.info("Stargit registration disabled in .env")
+        return
+    if not STARGIT_API_KEY:
+        logger.error("STARGIT_API_KEY not set in .env; registration disabled")
+        return
+
+    try:
+        metrics = collect_server_metrics() if event_type == 'heartbeat' else {}
+        payload = {
+            "server_id": STARBRIDGE_SERVER_ID,
+            "event_type": event_type,
+            "status": "online",
+            "metrics": metrics,
+            "timestamp": time.time(),
+            "ip_address": requests.get('https://api.ipify.org').text if event_type == 'online' else None  # Get public IP on initial reg
+        }
+        headers = {
+            "x-api-key": STARGIT_API_KEY,
+            "Content-Type": "application/json"
+        }
+        response = requests.post(STARGIT_REGISTRATION_ENDPOINT, json=payload, headers=headers)
+        if response.status_code == 200:
+            logger.info("Successfully sent %s to stargit.com: %s", event_type, response.json())
+        else:
+            logger.warning("Failed to send %s to stargit.com: %s", event_type, response.text)
+    except Exception as e:
+        logger.error("Error during stargit.com %s: %s", event_type, str(e))
+
+def registration_thread():
+    """Background thread for initial registration and periodic heartbeats."""
+    if ENABLE_STARGIT_REGISTRATION:
+        register_with_stargit(event_type='online')  # Initial registration
+        while True:
+            register_with_stargit(event_type='heartbeat')  # Periodic heartbeat with metrics
+            time.sleep(300)  # 5 minutes
+# Start registration thread
+if ENABLE_STARGIT_REGISTRATION:
+    threading.Thread(target=registration_thread, daemon=True).start()
 
 # Main entry point for running the server
 if __name__ == '__main__':
