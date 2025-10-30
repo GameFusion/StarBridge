@@ -15,6 +15,7 @@ import logging
 from logging.handlers import RotatingFileHandler
 import threading
 import psutil
+from datetime import datetime, timedelta
 
 # Configure logging
 logging.basicConfig(
@@ -41,11 +42,30 @@ GIT_EXECUTABLE = settings.get("git_executable")
 REPOSITORIES = settings["repositories"]
 CERT_PATH = settings['ssl']['cert_path']
 KEY_PATH = settings['ssl']['key_path']
-STARGIT_URL = "https://stargit.com/api/tokens/validate"
-STARGIT_REGISTRATION_ENDPOINT = "https://stargit.com/api/servers/register"
-ENABLE_STARGIT_REGISTRATION = os.getenv('ENABLE_STARGIT_REGISTRATION', 'false').lower() == 'true'
+
 STARGIT_API_KEY = os.getenv('STARGIT_API_KEY', '')
-STARBRIDGE_SERVER_ID = os.getenv('STARBRIDGE_SERVER_ID', str(uuid.uuid4()))  # Unique server ID
+
+# Hardcoded endpoints (override with STARGIT_API_URL for testing)
+STARGIT_API_URL = os.getenv('STARGIT_API_URL', 'https://stargit.com')
+AUTH_ENDPOINT = f"{STARGIT_API_URL}/api/auth/token"
+REGISTER_ENDPOINT = f"{STARGIT_API_URL}/api/servers/register"
+HEARTBEAT_ENDPOINT = f"{STARGIT_API_URL}/api/servers/heartbeat"
+
+# Add this near the top, after loading env
+PUSH_MODE = os.getenv('PUSH_MODE', 'false').lower() == 'true'
+if not PUSH_MODE:
+    logger.info("PUSH_MODE is disabled in .env; repository details will not be pushed to StarGit during heartbeats.")
+else:
+    logger.info("PUSH_MODE is enabled in .env; repository details will be pushed to StarGit during heartbeats.")
+
+# Token storage (in-memory)
+tokens = {
+    'access_token': None,
+    'refresh_token': None,
+    'expires_at': None,
+    'api_key_uuid': None  # Store APIKey.uuid as server_id
+}
+
 SSL_MODE = os.getenv('SSL_MODE', 'none').lower()
 
 # Load the API key from environment variable
@@ -211,8 +231,58 @@ def git_add_file():
         logger.error("Failed to add file '%s': %s", path_file_name_to_add, str(e))
         return jsonify({"error": f"Failed to add file '{path_file_name_to_add}': {str(e)}"}), 500
 
+def get_branches_data(repo_path):
+    """
+    Returns local and remote branches for a given repo path.
+    Returns:
+        (branches_data, error)
+        branches_data = {
+            "local_branches": [{"name": "main"}, ...],
+            "remote_branches": [{"name": "origin/main"}, ...]
+        }
+        error = None if success, otherwise {"type": str, "message": str}
+    """
+    if repo_path not in REPOSITORIES:
+        return None, {"type": "NotFound", "message": f"Repository path '{repo_path}' not found in registered repositories"}
+
+    try:
+        # Local branches
+        local_branches = run_git_command(repo_path, [GIT_EXECUTABLE, "-C", repo_path, "branch", "--format", "%(refname:short)"])
+        local_branches_info = [{"name": b.strip()} for b in local_branches.splitlines() if b.strip()]
+
+        # Remote branches
+        remote_branches = run_git_command(repo_path, [GIT_EXECUTABLE, "-C", repo_path, "branch", "-r", "--format", "%(refname:short)"])
+        remote_branches_info = [{"name": b.strip()} for b in remote_branches.splitlines() if b.strip()]
+
+        branches_data = {
+            "local_branches": local_branches_info,
+            "remote_branches": remote_branches_info
+        }
+
+        return branches_data, None
+
+    except subprocess.CalledProcessError as e:
+        return None, {"type": "GitError", "message": str(e)}
+    except Exception as e:
+        return None, {"type": "Exception", "message": str(e)}
+    
 @app.route('/api/branch', methods=['POST'])
 def get_branches():
+    logger.info("API endpoint /api/branch called")
+    check_api_key()
+    data = request.json
+    repo_path = data.get('repo_path')
+
+    branches_data, error = get_branches_data(repo_path)
+    if error:
+        logger.error("Error retrieving branches for %s: %s", repo_path, error["message"])
+        return jsonify(error), 500
+
+    return jsonify(branches_data), 200
+
+### TODO REMOVE DEPRECATED AFTER CLEANUP
+@app.route('/api/branch_dep', methods=['POST'])
+def get_branches_deprected():
     logger.info("API endpoint /api/branch called")
     check_api_key()  # Verify the API key
     data = request.json
@@ -661,26 +731,25 @@ def commit():
             "details": e.stderr.decode() if e.stderr else str(e)
         }), 500
 
-@app.route('/api/status', methods=['POST'])
-def get_status():
-    logger.info("API endpoint /api/status called")
-    check_api_key()
-    data = request.json
-    path = data.get('repo_path')
-
+def get_git_status_data(repo_path, git_executable="git"):
+    """
+    Get detailed Git status for the given repository path.
+    Returns:
+        (status_data, error)
+        where `error` is None if success, otherwise a dict with details.
+    """
     try:
-        # Run `git status --porcelain` to get a summary of changes
+        # Run `git status --porcelain` to detect changes
         result = subprocess.run(
-            [GIT_EXECUTABLE, "status", "--porcelain"],
-            cwd=path,
+            [git_executable, "status", "--porcelain", "-b"],
+            cwd=repo_path,
             capture_output=True,
             text=True,
             check=True
         )
         output = result.stdout.strip().splitlines()
 
-        # Parse the output to categorize files
-        status_summary = {
+        summary = {
             "added": [],
             "modified": [],
             "deleted": [],
@@ -688,74 +757,107 @@ def get_status():
             "untracked": []
         }
 
-        for line in output:
-            status_code = line[:2].strip()
-            logger.info("Processing line: %s", line)
-            file_path = line[3:]
+        branch_line = output[0] if output else ""
+        has_conflict = False
+        has_pending_changes = False
+        only_untracked = False
+
+        for line in output[1:]:  # skip branch line
+            if not line.strip():
+                continue
 
             parts = line.split(maxsplit=2)
-
             if len(parts) < 2:
-                continue  # Skip lines that don't conform to expected structure
+                continue
 
             status_code = parts[0]
             file_path = parts[1]
 
-            if status_code == "A":  # Added
-                status_summary["added"].append(file_path)
-            elif status_code == "M":  # Modified
-                status_summary["modified"].append(file_path)
-            elif status_code == "D":  # Deleted
-                status_summary["deleted"].append(file_path)
-            elif status_code == "R":  # Renamed (also shows previous path)
-                previous_path, new_path = file_path.split(" -> ")
-                status_summary["renamed"].append({
-                    "from": previous_path,
-                    "to": new_path
-                })
-            elif status_code == "??":  # Untracked
-                status_summary["untracked"].append(file_path)
+            # Detect merge conflicts
+            if "U" in status_code:  
+                has_conflict = True
 
-        # Generate action message with details about pending changes
-        # has_pending_changes = any(status_summary[key] for key in status_summary)
-        has_pending_changes = any(status_summary[key] for key in status_summary if key != "untracked")
-        only_untracked = bool(status_summary["untracked"]) and not has_pending_changes
-        if has_pending_changes:
-            change_details = []
+            if status_code == "A":
+                summary["added"].append(file_path)
+            elif status_code == "M":
+                summary["modified"].append(file_path)
+            elif status_code == "D":
+                summary["deleted"].append(file_path)
+            elif status_code.startswith("R") and "->" in file_path:
+                old, new = file_path.split("->", 1)
+                summary["renamed"].append({"from": old.strip(), "to": new.strip()})
+            elif status_code == "??":
+                summary["untracked"].append(file_path)
 
-            # Only include details with non-zero counts
-            if status_summary["added"]:
-                change_details.append(f"{len(status_summary['added'])} added")
-            if status_summary["modified"]:
-                change_details.append(f"{len(status_summary['modified'])} modified")
-            if status_summary["deleted"]:
-                change_details.append(f"{len(status_summary['deleted'])} deleted")
-            if status_summary["renamed"]:
-                change_details.append(f"{len(status_summary['renamed'])} renamed")
-            if status_summary["untracked"]:
-                change_details.append(f"{len(status_summary['untracked'])} untracked")
+        has_pending_changes = any(summary[k] for k in summary if k != "untracked")
+        only_untracked = bool(summary["untracked"]) and not has_pending_changes
 
-            # Join change details to form the message
-            action_message = f"Pending changes detected: {', '.join(change_details)}. Please commit or stash your changes."
+        # Determine action_summary
+        if has_conflict:
+            action_summary = "Merge conflict"
+        elif has_pending_changes:
+            action_summary = "Pending changes"
         elif only_untracked:
-            action_message = f"{len(status_summary['untracked'])} untracked file(s) detected. You may want to add them to the repository."
+            action_summary = "Untracked files"
+        else:
+            # Check if branch is ahead/behind remote
+            ahead = re.search(r"\[ahead (\d+)\]", branch_line)
+            behind = re.search(r"\[behind (\d+)\]", branch_line)
+
+            if behind:
+                action_summary = "Ready to pull"
+            elif ahead:
+                action_summary = "Ready to push"
+            else:
+                action_summary = "Up to date"
+
+        # Build action_message as before
+        if has_pending_changes:
+            details = [f"{len(v)} {k}" for k, v in summary.items() if v]
+            action_message = f"Pending changes detected: {', '.join(details)}. Please commit or stash your changes."
+        elif only_untracked:
+            action_message = f"{len(summary['untracked'])} untracked file(s) detected. You may want to add them."
+        elif has_conflict:
+            action_message = "Merge conflicts detected. Resolve them before continuing."
         else:
             action_message = "No changes detected. Working directory is clean."
 
-        return jsonify({
-            "summary": status_summary,
+        status_data = {
+            "summary": summary,
             "action_message": action_message,
-            "message": "Git status retrieved successfully."
-        })
+            "action_summary": action_summary
+        }
+        return status_data, None
 
     except subprocess.CalledProcessError as e:
-        # stderr is already a string since text=True in run_git_command
         error_message = e.stderr.strip() if e.stderr else str(e)
-        logger.error("Failed to retrieve status: %s", error_message)
-        return jsonify({"error": f"Failed to retrieve status: {error_message}"}), 500
+        logger.error("Git error retrieving status for %s: %s", repo_path, error_message)
+        return None, {"type": "GitError", "message": error_message}
+
     except Exception as e:
-        logger.error("Unexpected error in get_status: %s", str(e))
-        return jsonify({"error": f"Unexpected error: {str(e)}"}), 500
+        logger.error("Unexpected error retrieving git status for %s: %s", repo_path, str(e))
+        return None, {"type": "Exception", "message": str(e)}
+
+@app.route('/api/status', methods=['POST'])
+def get_status():
+    logger.info("API endpoint /api/status called")
+    check_api_key()
+
+    data = request.json
+    repo_path = data.get('repo_path')
+    if not repo_path:
+        return jsonify({"error": "Repository path is required"}), 400
+
+    status_data, status_error = get_git_status_data(repo_path)
+    if status_error:
+        logger.error("Error retrieving git status for %s: %s", repo_path, status_error["message"])
+        return jsonify({
+            "error": status_error["message"],
+            "type": status_error["type"]
+        }), 500
+
+    status_data["message"] = "Git status retrieved successfully."
+    return jsonify(status_data), 200
 
 #@app.route('/api/pull', methods=['POST'])
 #def pull():
@@ -1681,47 +1783,211 @@ def collect_server_metrics():
         logger.error("Failed to collect server metrics: %s", str(e))
         return {}
 
+def get_access_token():
+    """Fetch or refresh an access token."""
+    global tokens
+    if tokens['access_token'] and tokens['expires_at'] and datetime.utcnow() < tokens['expires_at'] - timedelta(seconds=60):
+        logger.debug("Using existing valid access token")
+        return tokens['access_token']
+
+    # Try refreshing if refresh_token exists
+    if tokens['refresh_token']:
+        try:
+            response = requests.post(
+                AUTH_ENDPOINT.replace('/token', '/refresh'),
+                json={'refresh_token': tokens['refresh_token']}
+            )
+            if response.status_code == 200:
+                data = response.json()
+                tokens['access_token'] = data['access_token']
+                tokens['expires_at'] = datetime.utcnow() + timedelta(hours=1)
+                logger.info("Access token refreshed successfully")
+                return tokens['access_token']
+            else:
+                logger.warning("Failed to refresh token from %s: %s (status: %d)", AUTH_ENDPOINT.replace('/token', '/refresh'), response.text, response.status_code)
+        except Exception as e:
+            logger.warning("Failed to refresh token: %s", str(e))
+
+    # Fetch new token
+    if not STARGIT_API_KEY:
+        logger.error("STARGIT_API_KEY not set in .env")
+        return None
+    logger.debug("Using API key (masked): %s...", STARGIT_API_KEY[:8])
+    try:
+        headers = {
+            "Authorization": f"Bearer {STARGIT_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "scopes": "servers:register servers:heartbeat"
+            # No metadata in initial request
+        }
+        response = requests.post(AUTH_ENDPOINT, json=payload, headers=headers)
+        if response.status_code == 200:
+            data = response.json()
+            tokens['access_token'] = data['access_token']
+            tokens['refresh_token'] = data.get('refresh_token')
+            tokens['expires_at'] = datetime.utcnow() + timedelta(hours=1)
+            tokens['api_key_uuid'] = data.get('api_key_uuid')
+            logger.info("New access token fetched successfully, api_key_uuid: %s", tokens['api_key_uuid'])
+            return tokens['access_token']
+        else:
+            logger.error("Failed to fetch token from %s: %s (status: %d, key: %s...)", AUTH_ENDPOINT, response.text, response.status_code, STARGIT_API_KEY[:8])
+            return None
+    except Exception as e:
+        logger.error("Error fetching token from %s: %s (key: %s...)", AUTH_ENDPOINT, str(e), STARGIT_API_KEY[:8])
+        return None
+
+# Add this new function to collect detailed repository information
+def collect_repo_details():
+    """
+    Collect detailed information about all local repositories, including branches, status, remotes, and commits.
+    Returns a structure similar to the provided example.
+    """
+    servers = {"name": "Origin Server", "repos": []}
+    
+    for repo_path in REPOSITORIES:
+        repo_name = os.path.basename(repo_path)
+        repo = {"name": repo_name}
+        
+        # Get branch info
+        branch_info = get_current_branch_or_default(repo_path)
+        repo["branch"] = branch_info['branch']
+        
+        # Get status and determine action status
+        status_data, status_error = get_git_status_data(repo_path)
+        if status_error:
+            repo["status"] = {"error": status_error["message"]}
+        else:
+            repo["status"] = status_data
+
+        # Get remotes
+        remotes_info = []
+        remotes_output = run_git_command(repo_path, [GIT_EXECUTABLE, "-C", repo_path, "remote", "-v"])
+        seen = set()  # To avoid duplicates if fetch/push are the same
+        for line in remotes_output.splitlines():
+            if line.strip():
+                parts = line.split()
+                if len(parts) >= 3:
+                    name, url, typ = parts[0], parts[1], parts[2].strip('()')
+                    key = (name, typ, url)
+                    if key not in seen:
+                        remotes_info.append({"name": name, "type": typ, "url": url})
+                        seen.add(key)
+        repo["remotes"] = remotes_info
+        
+        print("repo['remotes']", repo["remotes"], flush=True)
+
+        branches, branches_error = get_branches_data(repo_path)
+        if branches_error:
+            print("Failed to get branches:", branches_error)
+            repo["branches"] = branches_error
+        else:
+            print("Branches data:", branches)
+            repo["branches"] = branches
+
+        # Get commits (using rev_walk logic)
+        command = [GIT_EXECUTABLE, "-C", repo_path, "log", "--date=iso", "--pretty=format:%H|%P|%an|%ae|%ad|%s", repo["branch"]]
+        process = subprocess.Popen(command, stdout=PIPE, stderr=PIPE)
+        stdout, stderr = process.communicate()
+        commits = []
+        if process.returncode == 0:
+            commit_lines = stdout.decode('utf-8').splitlines()
+            for line in commit_lines:
+                if line.strip():
+                    try:
+                        sha, parents, author_name, author_email, date, message = line.split("|", 5)
+                        parents_list = parents.split() if parents else []
+                        commits.append({
+                            "sha": sha,
+                            "parents": parents_list,
+                            "author_name": author_name,
+                            "author_email": author_email,
+                            "date": date,
+                            "message": message
+                        })
+                    except ValueError:
+                        logger.warning("Malformed commit line in repo %s: %s", repo_name, line)
+        else:
+            logger.warning("Failed to fetch commits for repo %s: %s", repo_name, stderr.decode('utf-8'))
+        repo["commits"] = commits
+        
+        servers["repos"].append(repo)
+    
+    return servers
+
 def register_with_stargit(event_type='heartbeat'):
-    """Send registration or heartbeat to stargit.com."""
+    """Send registration or heartbeat to stargit.com using token."""
     logger.debug(f"Registering with stargit.com, event_type={event_type}")
-    if not ENABLE_STARGIT_REGISTRATION:
+    if not STARGIT_API_KEY:
         logger.info("Stargit registration disabled in .env")
         return
-    if not STARGIT_API_KEY:
-        logger.error("STARGIT_API_KEY not set in .env; registration disabled")
+    access_token = get_access_token()
+    if not access_token or not tokens['api_key_uuid']:
+        logger.error("No valid access token or api_key_uuid; registration aborted (key: %s...)", STARGIT_API_KEY[:8] if STARGIT_API_KEY else "None")
         return
+    else:
+        logger.info("Valid access token recieved %s: ", access_token)
 
     try:
         metrics = collect_server_metrics() if event_type == 'heartbeat' else {}
         payload = {
-            "server_id": STARBRIDGE_SERVER_ID,
+            "server_id": tokens['api_key_uuid'],
             "event_type": event_type,
             "status": "online",
             "metrics": metrics,
             "timestamp": time.time(),
-            "ip_address": requests.get('https://api.ipify.org').text if event_type == 'online' else None  # Get public IP on initial reg
+            "ip_address": requests.get('https://api.ipify.org').text if event_type == 'online' else None
         }
+        # Include detailed repo info only in heartbeats if PUSH_MODE is enabled
+        if event_type == 'heartbeat' and PUSH_MODE:
+            payload["repositories"] = collect_repo_details()
+            logger.info("repositories:\n%s", json.dumps(payload["repositories"], indent=4, default=str))
+            logger.debug("Including detailed repository information in heartbeat payload due to PUSH_MODE=true")
+        
         headers = {
-            "x-api-key": STARGIT_API_KEY,
+            "Authorization": f"Bearer {access_token}",
             "Content-Type": "application/json"
         }
-        response = requests.post(STARGIT_REGISTRATION_ENDPOINT, json=payload, headers=headers)
+        
+        endpoint = REGISTER_ENDPOINT if event_type == 'online' else HEARTBEAT_ENDPOINT
+
+        logger.info(">>>> access_token %s", access_token)
+        logger.info("*** Calling %s ", endpoint)
+        logger.info("*** *** payload %s ", payload)
+        logger.info("*** *** **** headers %s ", headers)
+        response = requests.post(endpoint, json=payload, headers=headers)
         if response.status_code == 200:
-            logger.info("Successfully sent %s to stargit.com: %s", event_type, response.json())
+            logger.info("Successfully sent %s to %s: %s", event_type, endpoint, response.json())
+        elif response.status_code == 401:
+            logger.warning("Token invalid or expired, attempting to refresh")
+            exit(0)
+            tokens['access_token'] = None
+            access_token = get_access_token()
+            if access_token:
+                headers["Authorization"] = f"Bearer {access_token}"
+                response = requests.post(endpoint, json=payload, headers=headers)
+                if response.status_code == 200:
+                    logger.info("Successfully sent %s after token refresh: %s", event_type, response.json())
+                else:
+                    logger.error("Failed to send %s after refresh to %s: %s (status: %d)", event_type, endpoint, response.text, response.status_code)
+            else:
+                logger.error("Failed to refresh token; %s aborted", event_type)
         else:
-            logger.warning("Failed to send %s to stargit.com: %s", event_type, response.text)
+            logger.error("Failed to send %s to %s: %s (status: %d)", event_type, endpoint, response.text, response.status_code)
     except Exception as e:
-        logger.error("Error during stargit.com %s: %s", event_type, str(e))
+        logger.error("Error during %s to %s: %s", event_type, endpoint, str(e))
 
 def registration_thread():
     """Background thread for initial registration and periodic heartbeats."""
-    if ENABLE_STARGIT_REGISTRATION:
+    if STARGIT_API_KEY:
         register_with_stargit(event_type='online')  # Initial registration
         while True:
-            register_with_stargit(event_type='heartbeat')  # Periodic heartbeat with metrics
+            register_with_stargit(event_type='heartbeat')  # Periodic heartbeat
             time.sleep(300)  # 5 minutes
+
 # Start registration thread
-if ENABLE_STARGIT_REGISTRATION:
+if STARGIT_API_KEY:
     threading.Thread(target=registration_thread, daemon=True).start()
 
 # Main entry point for running the server
