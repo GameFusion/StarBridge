@@ -2069,21 +2069,23 @@ def get_file_content(repo_path, file_path, ref='HEAD'):
     command = [GIT_EXECUTABLE, "-C", repo_path, "show", f"{ref}:{file_path}"]
     try:
         result = subprocess.run(command, cwd=repo_path, capture_output=True, text=False, timeout=30)
-        if result.returncode == 0:
-            content = result.stdout  # bytes
-            mime, _ = mimetypes.guess_type(file_path)
-            if mime and mime.startswith('text/'):
-                try:
-                    content_str = content.decode('utf-8')
-                    return {"content": content_str, "is_base64": False, "mime_type": mime}, None
-                except UnicodeDecodeError:
-                    # Fallback to base64 if decoding fails
-                    return {"content": base64.b64encode(content).decode('ascii'), "is_base64": True, "mime_type": mime}, None
-            else:
-                # Binary: always base64
-                return {"content": base64.b64encode(content).decode('ascii'), "is_base64": True, "mime_type": mime}, None
-        else:
+        if result.returncode != 0:
             return None, result.stderr.decode('utf-8', errors='ignore')
+        
+        content = result.stdout  # bytes
+        mime, _ = mimetypes.guess_type(file_path)
+        
+        # Attempt decode to check if text
+        try:
+            content_str = content.decode('utf-8')
+            # If decodes, it's text: no base64, default mime if None
+            mime = mime or 'text/plain'
+            return {"content": content_str, "is_base64": False, "mime_type": mime}, None
+        except UnicodeDecodeError:
+            # Binary or invalid text: base64, default mime if None
+            mime = mime or 'application/octet-stream'
+            encoded = base64.b64encode(content).decode('ascii')
+            return {"content": encoded, "is_base64": True, "mime_type": mime}, None
     except Exception as e:
         return None, str(e)
 
