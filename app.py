@@ -1994,7 +1994,286 @@ def collect_repo_details():
     
     return servers
 
-def register_with_stargit(event_type='heartbeat'):
+# Collect lightweight summaries
+def collect_repo_summaries():
+    summaries = {}
+    for repo_path in REPOSITORIES:
+        repo_name = os.path.basename(repo_path)
+        branches_data, _ = get_branches_data(repo_path)
+        heads = {}
+        for branch in branches_data['local_branches']:
+            branch_name = branch['name']
+            head_sha = run_git_command(repo_path, [GIT_EXECUTABLE, "-C", repo_path, "rev-parse", branch_name])
+            heads[branch_name] = head_sha
+        summaries[repo_name] = {'heads': heads}
+    return summaries
+
+# Compute delta for a repo/branch
+def compute_commit_delta(repo_path, branch, last_head):
+    """
+    Compute the delta commits for a repo/branch since last_head.
+    If last_head is None, returns full history.
+    Returns list of commit dicts.
+    """
+    if not last_head:
+        # Full history
+        command = [GIT_EXECUTABLE, "-C", repo_path, "log", "--date=iso", "--pretty=format:%H|%P|%an|%ae|%ad|%s", branch]
+    else:
+        # Delta from last_head..HEAD
+        command = [GIT_EXECUTABLE, "-C", repo_path, "log", f"{last_head}..HEAD", "--date=iso", "--pretty=format:%H|%P|%an|%ae|%ad|%s", branch]
+    
+    # Run the command
+    result = subprocess.run(command, cwd=repo_path, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    
+    if result.returncode != 0:
+        # Handle no commits (e.g., initial commit or error)
+        stderr = result.stderr.lower()
+        if "does not have any commits yet" in stderr or "bad revision" in stderr:
+            return [{
+                "sha": "00000000",
+                "parents": [],
+                "author_name": "",
+                "author_email": "",
+                "date": "",
+                "message": "Initial commit"
+            }]
+        else:
+            raise Exception(f"Git command failed: {result.stderr.strip()}")
+    
+    # Parse the output
+    commits = []
+    lines = result.stdout.splitlines()
+    for line in lines:
+        if line.strip():
+            parts = line.split("|", 5)
+            if len(parts) == 6:
+                sha, parents_str, author_name, author_email, date, message = parts
+                parents = parents_str.split() if parents_str else []
+                commits.append({
+                    "sha": sha,
+                    "parents": parents,
+                    "author_name": author_name,
+                    "author_email": author_email,
+                    "date": date,
+                    "message": message
+                })
+            else:
+                logger.warning(f"Malformed git log line: {line}")
+    
+    return commits
+
+def find_repo_path_by_name(repo_name):
+    for path in REPOSITORIES:
+        if os.path.basename(path) == repo_name:
+            return path
+    return None
+
+# Compute other deltas (e.g., files, branches if HEAD changed)
+import subprocess
+import os
+
+# Compute other deltas (e.g., files, branches if HEAD changed)
+def compute_other_deltas(repo_path, branch, last_head, current_head):
+    if last_head == current_head:
+        return {}  # No change, skip
+    deltas = {}
+    # Branches (full if changed)
+    branches_data, _ = get_branches_data(repo_path)
+    deltas['branches'] = branches_data
+    # Remotes (full)
+    remotes_output = run_git_command(repo_path, [GIT_EXECUTABLE, "-C", repo_path, "remote", "-v"])
+    # Parse remotes as in /api/remotes
+    remotes_info = []
+    seen = set()  # To avoid duplicates for fetch/push
+    for line in remotes_output.splitlines():
+        if line.strip():
+            parts = line.split()
+            if len(parts) >= 3:
+                remote_name, remote_url, remote_type = parts[0], parts[1], parts[2].strip('()')
+                key = (remote_name, remote_url, remote_type)
+                if key not in seen:
+                    remotes_info.append({
+                        "name": remote_name,
+                        "url": remote_url,
+                        "type": remote_type
+                    })
+                    seen.add(key)
+    deltas['remotes'] = {"remotes": remotes_info}  # Match structure if needed, or just list
+    # Files (full ls-tree if changed)
+    files, total_size = get_file_list(repo_path)
+    deltas['files'] = files
+    # README (if exists and changed)
+    deltas['readme'] = get_readme_text(repo_path)
+    # Status/Diff (always refresh if changed)
+    status_data, _ = get_git_status_data(repo_path)
+    deltas['status'] = status_data
+    # Diff (from /api/diff logic, between last_head and current_head)
+    try:
+        if last_head and current_head:
+            git_command = [GIT_EXECUTABLE, "-C", repo_path, "diff", f"{last_head}..{current_head}"]
+        else:
+            # Fallback to full HEAD diff if no last_head
+            git_command = [GIT_EXECUTABLE, "-C", repo_path, "diff", "HEAD"]
+        
+        result = subprocess.run(git_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        
+        if result.returncode != 0:
+            logger.error("Error running git diff: %s", result.stderr)
+            deltas['diff'] = {"error": result.stderr.strip()}
+        else:
+            diff_output = result.stdout
+            original_size = len(diff_output)
+            # Log warning if diff is very large (e.g., >5MB), but send full
+            if original_size > 5 * 1024 * 1024:
+                logger.warning("Large diff detected for %s: %d bytes; consider truncation in future", repo_path, original_size)
+            deltas['diff'] = {
+                "diff": diff_output,
+                "diff_info": {
+                    "original_size": original_size,
+                    "status": "complete"
+                }
+            }
+    except Exception as e:
+        logger.error("Exception computing diff: %s", str(e))
+        deltas['diff'] = {"error": str(e)}
+    
+    return deltas
+
+# Helper for token refresh (extracted for reuse)
+def refresh_token_and_retry(access_token, func, *args, **kwargs):
+    tokens['access_token'] = None
+    new_token = get_access_token()
+    if new_token:
+        logger.info("Token refreshed successfully")
+        headers["Authorization"] = f"Bearer {new_token}"
+        return func(*args, **kwargs)  # Retry with new headers
+    else:
+        logger.error("Failed to refresh token; skipping retry")
+        return None
+
+# Simple retry wrapper (since no sessions; max 3 attempts with backoff)
+def post_with_retry(url, json_data, headers, timeout=10, max_retries=3):
+    for attempt in range(1, max_retries + 1):
+        try:
+            response = requests.post(url, json=json_data, headers=headers, timeout=timeout)
+            if response.status_code // 100 == 5 or response.status_code in [429]:  # Server errors or rate limit
+                if attempt < max_retries:
+                    time.sleep(attempt)  # Backoff
+                    continue
+            return response
+        except requests.exceptions.RequestException as e:
+            logger.warning(f"Request failed (attempt {attempt}): {str(e)}")
+            if attempt < max_retries:
+                time.sleep(attempt)
+            else:
+                raise
+    raise Exception("Max retries exceeded")
+
+# Send heartbeat to stargit.com
+def send_heartbeat_to_stargit():
+    """Send heartbeat to stargit.com using token."""
+    logger.debug("Sending heartbeat to stargit.com")
+    if not STARGIT_API_KEY:
+        logger.info("Stargit registration disabled in .env")
+        return
+    access_token = get_access_token()
+    if not access_token or not tokens['api_key_uuid']:
+        logger.error("No valid access token or api_key_uuid; registration aborted (key: %s...)", STARGIT_API_KEY[:8] if STARGIT_API_KEY else "None")
+        return
+    else:
+        logger.info("Valid access token received: %s...", access_token[:10])  # Mask for logs
+
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Content-Type": "application/json"
+    }
+
+    # Fetch IP with error handling
+    try:
+        ip_response = requests.get('https://api.ipify.org', timeout=5)
+        ip_response.raise_for_status()
+        ip_address = ip_response.text
+    except Exception as e:
+        logger.warning(f"Failed to fetch IP: {str(e)}; using None")
+        ip_address = None
+
+    base_payload = {
+        "server_uuid": tokens['api_key_uuid'],
+        "event_type": 'heartbeat',
+        "status": "online",
+        "timestamp": time.time(),
+        "ip_address": ip_address
+    }
+
+    # Step 1: Probe with metrics and repo summaries
+    summaries = collect_repo_summaries()
+    metrics = collect_server_metrics()
+    payload = {**base_payload, "mode": "probe", "metrics": metrics, "repo_summaries": summaries}
+    response = post_with_retry(HEARTBEAT_ENDPOINT, payload, headers, timeout=10)
+
+    if response.status_code == 401:
+        response = refresh_token_and_retry(access_token, post_with_retry, HEARTBEAT_ENDPOINT, payload, headers, timeout=10)
+
+    if response.status_code == 200:
+        try:
+            data = response.json()
+            needed_deltas = data.get('needed_deltas', {})
+            # Validate structure
+            if not isinstance(needed_deltas, dict):
+                raise ValueError("needed_deltas is not a dict")
+            for repo, branches in needed_deltas.items():
+                if not isinstance(branches, dict):
+                    raise ValueError(f"Branches for {repo} is not a dict")
+        except (json.JSONDecodeError, ValueError) as e:
+            logger.error(f"Invalid response JSON or structure: {str(e)}; body: {response.text}")
+            return  # Abort; retry next cycle
+
+        if needed_deltas:
+            logger.info("Deltas needed for %d repos", len(needed_deltas))
+            # Compute deltas
+            deltas = {}
+            for repo_name, branch_deltas in needed_deltas.items():
+                repo_path = find_repo_path_by_name(repo_name)
+                if not repo_path:
+                    logger.warning("Repo %s not found locally; skipping", repo_name)
+                    continue
+                # Compute deltas for each branch
+                repo_deltas = {}
+                for branch, last_head in branch_deltas.items():
+                    current_head = summaries.get(repo_name, {}).get('heads', {}).get(branch)
+                    if not current_head:
+                        logger.warning(f"Current head missing for {repo_name}/{branch}; skipping")
+                        continue
+                    commit_delta = compute_commit_delta(repo_path, branch, last_head)
+                    other_delta = compute_other_deltas(repo_path, branch, last_head, current_head)
+                    repo_deltas[branch] = {
+                        "commits": commit_delta,
+                        **other_delta  # Merge files, branches, etc.
+                    }
+                    logger.debug(f"Computed delta for {repo_name}/{branch}: {len(commit_delta)} commits")
+                deltas[repo_name] = repo_deltas
+
+            # Step 2: Immediate update (longer timeout for potential large deltas)
+            update_payload = {
+                **base_payload,
+                "mode": "update",
+                "deltas": deltas
+            }
+            update_response = post_with_retry(HEARTBEAT_ENDPOINT, update_payload, headers, timeout=30)
+
+            if update_response.status_code == 401:
+                update_response = refresh_token_and_retry(access_token, post_with_retry, HEARTBEAT_ENDPOINT, update_payload, headers, timeout=30)
+
+            if update_response.status_code == 200:
+                logger.info("Delta update successful: %s", update_response.json())
+            else:
+                logger.error("Delta update failed: %s (status: %d); will retry next cycle", update_response.text, update_response.status_code)
+        else:
+            logger.info("No deltas needed")
+    else:
+        logger.error("Heartbeat probe failed: %s (status: %d); will retry next cycle", response.text, response.status_code)
+
+def register_with_stargit(event_type='online'):
     """Send registration or heartbeat to stargit.com using token."""
     logger.debug(f"Registering with stargit.com, event_type={event_type}")
     if not STARGIT_API_KEY:
@@ -2061,7 +2340,7 @@ def registration_thread():
     if STARGIT_API_KEY:
         register_with_stargit(event_type='online')  # Initial registration
         while True:
-            register_with_stargit(event_type='heartbeat')  # Periodic heartbeat
+            send_heartbeat_to_stargit()  # Periodic heartbeat
             time.sleep(300)  # 5 minutes
 
 # Binary-safe file fetch (git show returns bytes)
