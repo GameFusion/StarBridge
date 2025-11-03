@@ -54,6 +54,8 @@ REGISTER_ENDPOINT = f"{STARGIT_API_URL}/api/servers/register"
 HEARTBEAT_ENDPOINT = f"{STARGIT_API_URL}/api/servers/heartbeat"
 POLL_ENDPOINT = f"{STARGIT_API_URL}/api/servers/poll"
 
+GIT_VERBOSE_MODE = os.getenv("GIT_VERBOSE", "false").lower() in ("1", "true", "yes", "on")
+
 # Add this near the top, after loading env
 PUSH_MODE = os.getenv('PUSH_MODE', 'false').lower() == 'true'
 if not PUSH_MODE:
@@ -147,15 +149,17 @@ def validate_session(lock_path, session_id):
 
 def run_git_command(path, command):
     """Utility function to run a git command and return the output."""
-    logger.debug("Running git command: %s in path: %s", command, path)
+    if GIT_VERBOSE_MODE:
+        logger.debug("Running git command: %s in path: %s", command, path)
     try:
         result = subprocess.run(command, cwd=path, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True)
-        logger.debug("Git command output: %s", result.stdout.strip())
+        if GIT_VERBOSE_MODE:
+            logger.debug("Git command output: %s", result.stdout.strip())
         return result.stdout.strip()
     except subprocess.CalledProcessError as e:
         logger.error("Git command error: %s", e.stderr.strip())
         return f"Error: {e.stderr.strip()}"
-
+    
 @app.route('/api/refs', methods=['POST'])
 def get_refs():
     logger.info("API endpoint /api/refs called")
@@ -1841,17 +1845,6 @@ def get_access_token():
         logger.error("Error fetching token from %s: %s (key: %s...)", AUTH_ENDPOINT, str(e), STARGIT_API_KEY[:8])
         return None
 
-# Existing run_git_command function (from your code)
-def run_git_command(path, command):
-    """Utility function to run a git command and return the output."""
-    logger.debug("Running git command: %s in path: %s", command, path)
-    try:
-        result = subprocess.run(command, cwd=path, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True)
-        logger.debug("Git command output: %s", result.stdout.strip())
-        return result.stdout.strip()
-    except subprocess.CalledProcessError as e:
-        logger.error("Git command error: %s", e.stderr.strip())
-        return f"Error: {e.stderr.strip()}"
 
 import concurrent.futures
 
@@ -1906,7 +1899,7 @@ def get_readme_text(repo_path):
         except Exception as e:
             logger.error("Error reading README.md in %s: %s", repo_path, str(e))
             return ""
-    logger.debug("No README.md found in %s", repo_path)
+    #logger.debug("No README.md found in %s", repo_path)
     return ""
 
 # Updated collect_repo_details
@@ -2169,8 +2162,46 @@ def post_with_retry(url, json_data, headers, timeout=10, max_retries=3):
                 raise
     raise Exception("Max retries exceeded")
 
+def compute_repo_deltas(repo_name, branch_deltas, summaries):
+    """Compute deltas for a single repository."""
+    repo_path = find_repo_path_by_name(repo_name)
+    if not repo_path:
+        logger.warning("Repo %s not found locally; skipping", repo_name)
+        return None
+
+    repo_deltas = {}
+    for branch, last_head in branch_deltas.items():
+        current_head = summaries.get(repo_name, {}).get('heads', {}).get(branch)
+        if not current_head:
+            logger.warning(f"Current head missing for {repo_name}/{branch}; skipping")
+            continue
+
+        commit_delta = compute_commit_delta(repo_path, branch, last_head)
+        other_delta = compute_other_deltas(repo_path, branch, last_head, current_head)
+        repo_deltas[branch] = {"commits": commit_delta, **other_delta}
+
+        logger.debug(f"Computed delta for {repo_name}/{branch}: {len(commit_delta)} commits")
+
+    return repo_deltas
+
+def send_update(deltas, mode, access_token, headers, base_payload):
+    """Send delta update to Stargit with retry + logging."""
+    payload = {**base_payload, "mode": "update", "deltas": deltas}
+    response = post_with_retry(HEARTBEAT_ENDPOINT, payload, headers, timeout=30)
+
+    if response.status_code == 401:
+        response = refresh_token_and_retry(access_token, post_with_retry, HEARTBEAT_ENDPOINT, payload, headers, timeout=30)
+
+    if response.status_code == 200:
+        logger.info("%s delta update successful", mode.capitalize())
+    else:
+        logger.error("%s delta update failed: %s (status: %d)", 
+                     mode.capitalize(), response.text, response.status_code)
+
+    return response
+
 # Send heartbeat to stargit.com
-def send_heartbeat_to_stargit():
+def send_heartbeat_to_stargit(batch_mode=False):
     """Send heartbeat to stargit.com using token."""
     logger.debug("Sending heartbeat to stargit.com")
     if not STARGIT_API_KEY:
@@ -2228,46 +2259,24 @@ def send_heartbeat_to_stargit():
             logger.error(f"Invalid response JSON or structure: {str(e)}; body: {response.text}")
             return  # Abort; retry next cycle
 
+        # === Main Logic Compute Delta and Send Update ===
         if needed_deltas:
-            logger.info("Deltas needed for %d repos", len(needed_deltas))
-            # Compute deltas
-            deltas = {}
-            for repo_name, branch_deltas in needed_deltas.items():
-                repo_path = find_repo_path_by_name(repo_name)
-                if not repo_path:
-                    logger.warning("Repo %s not found locally; skipping", repo_name)
-                    continue
-                # Compute deltas for each branch
-                repo_deltas = {}
-                for branch, last_head in branch_deltas.items():
-                    current_head = summaries.get(repo_name, {}).get('heads', {}).get(branch)
-                    if not current_head:
-                        logger.warning(f"Current head missing for {repo_name}/{branch}; skipping")
-                        continue
-                    commit_delta = compute_commit_delta(repo_path, branch, last_head)
-                    other_delta = compute_other_deltas(repo_path, branch, last_head, current_head)
-                    repo_deltas[branch] = {
-                        "commits": commit_delta,
-                        **other_delta  # Merge files, branches, etc.
-                    }
-                    logger.debug(f"Computed delta for {repo_name}/{branch}: {len(commit_delta)} commits")
-                deltas[repo_name] = repo_deltas
+            logger.info("Computing deltas for %d repositories", len(needed_deltas))
 
-            # Step 2: Immediate update (longer timeout for potential large deltas)
-            update_payload = {
-                **base_payload,
-                "mode": "update",
-                "deltas": deltas
-            }
-            update_response = post_with_retry(HEARTBEAT_ENDPOINT, update_payload, headers, timeout=30)
-
-            if update_response.status_code == 401:
-                update_response = refresh_token_and_retry(access_token, post_with_retry, HEARTBEAT_ENDPOINT, update_payload, headers, timeout=30)
-
-            if update_response.status_code == 200:
-                logger.info("Delta update successful: %s", update_response.json())
+            if batch_mode:
+                logger.info("Batch mode: computing all deltas together")
+                deltas = {
+                    repo_name: repo_deltas
+                    for repo_name, branch_deltas in needed_deltas.items()
+                    if (repo_deltas := compute_repo_deltas(repo_name, branch_deltas, summaries))
+                }
+                send_update(deltas, "batch", access_token, headers, base_payload)
             else:
-                logger.error("Delta update failed: %s (status: %d); will retry next cycle", update_response.text, update_response.status_code)
+                logger.info("Per-repo mode: sending deltas individually")
+                for repo_name, branch_deltas in needed_deltas.items():
+                    if repo_deltas := compute_repo_deltas(repo_name, branch_deltas, summaries):
+                        send_update({repo_name: repo_deltas}, "per-repo", access_token, headers, base_payload)
+                        time.sleep(0.02)
         else:
             logger.info("No deltas needed")
     else:
@@ -2299,7 +2308,7 @@ def register_with_stargit(event_type='online'):
         # Include detailed repo info only in heartbeats if PUSH_MODE is enabled
         if event_type == 'heartbeat' and PUSH_MODE:
             payload["repositories"] = collect_repo_details()
-            logger.info("repositories:\n%s", json.dumps(payload["repositories"], indent=4, default=str))
+            #logger.info("repositories:\n%s", json.dumps(payload["repositories"], indent=4, default=str))
             logger.debug("Including detailed repository information in heartbeat payload due to PUSH_MODE=true")
         
         headers = {
