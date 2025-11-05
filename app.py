@@ -46,9 +46,8 @@ CERT_PATH = settings['ssl']['cert_path']
 KEY_PATH = settings['ssl']['key_path']
 
 STARGIT_API_KEY = os.getenv('STARGIT_API_KEY', '')
-
-# Hardcoded endpoints (override with STARGIT_API_URL for testing)
 STARGIT_API_URL = os.getenv('STARGIT_API_URL', 'https://stargit.com')
+SERVER_UUID = os.getenv("STARBRIDGE_SERVER_UUID")
 AUTH_ENDPOINT = f"{STARGIT_API_URL}/api/auth/token"
 REGISTER_ENDPOINT = f"{STARGIT_API_URL}/api/servers/register"
 HEARTBEAT_ENDPOINT = f"{STARGIT_API_URL}/api/servers/heartbeat"
@@ -56,7 +55,6 @@ POLL_ENDPOINT = f"{STARGIT_API_URL}/api/servers/poll"
 
 GIT_VERBOSE_MODE = os.getenv("GIT_VERBOSE", "false").lower() in ("1", "true", "yes", "on")
 
-# Add this near the top, after loading env
 PUSH_MODE = os.getenv('PUSH_MODE', 'false').lower() == 'true'
 if not PUSH_MODE:
     logger.info("PUSH_MODE is disabled in .env; repository details will not be pushed to StarGit during heartbeats.")
@@ -1819,15 +1817,23 @@ def get_access_token():
     if not STARGIT_API_KEY:
         logger.error("STARGIT_API_KEY not set in .env")
         return None
-    logger.debug("Using API key (masked): %s...", STARGIT_API_KEY[:8])
+    
+    if not SERVER_UUID:
+        logger.error("STARBRIDGE_SERVER_UUID not found in .env — please run setup script first.")
+        return None
+
+    logger.debug("Requesting new token using API key %s... for server %s", STARGIT_API_KEY[:8], SERVER_UUID)
+
     try:
         headers = {
             "Authorization": f"Bearer {STARGIT_API_KEY}",
             "Content-Type": "application/json"
         }
         payload = {
-            "scopes": "servers:register servers:heartbeat servers:poll"
-            # No metadata in initial request
+            "scopes": "servers:register servers:heartbeat servers:poll",
+            "metadata": {  # include server context here
+                "server_uuid": SERVER_UUID
+            }
         }
         response = requests.post(AUTH_ENDPOINT, json=payload, headers=headers)
         if response.status_code == 200:
@@ -1835,8 +1841,8 @@ def get_access_token():
             tokens['access_token'] = data['access_token']
             tokens['refresh_token'] = data.get('refresh_token')
             tokens['expires_at'] = datetime.utcnow() + timedelta(hours=1)
-            tokens['api_key_uuid'] = data.get('api_key_uuid')
-            logger.info("New access token fetched successfully, api_key_uuid: %s", tokens['api_key_uuid'])
+            tokens['api_key_uuid'] = data.get('api_key_uuid') # optional: still store for reference
+            logger.info("New access token fetched successfully for server_uuid: %s", SERVER_UUID)
             return tokens['access_token']
         else:
             logger.error("Failed to fetch token from %s: %s (status: %d, key: %s...)", AUTH_ENDPOINT, response.text, response.status_code, STARGIT_API_KEY[:8])
@@ -2229,7 +2235,7 @@ def send_heartbeat_to_stargit(batch_mode=False):
         ip_address = None
 
     base_payload = {
-        "server_uuid": tokens['api_key_uuid'],
+        "server_uuid": SERVER_UUID,
         "event_type": 'heartbeat',
         "status": "online",
         "timestamp": time.time(),
@@ -2239,6 +2245,12 @@ def send_heartbeat_to_stargit(batch_mode=False):
     # Step 1: Probe with metrics and repo summaries
     summaries = collect_repo_summaries()
     metrics = collect_server_metrics()
+
+    print("----------------------", flush=True)
+    print("----------------------", flush=True)
+    print("----------------------", flush=True)
+    print("----------------------", flush=True)
+    print("!!!!! metrics:", metrics, flush=True)
     payload = {**base_payload, "mode": "probe", "metrics": metrics, "repo_summaries": summaries}
     response = post_with_retry(HEARTBEAT_ENDPOINT, payload, headers, timeout=10)
 
@@ -2288,9 +2300,10 @@ def register_with_stargit(event_type='online'):
     if not STARGIT_API_KEY:
         logger.info("Stargit registration disabled in .env")
         return
+    
     access_token = get_access_token()
-    if not access_token or not tokens['api_key_uuid']:
-        logger.error("No valid access token or api_key_uuid; registration aborted (key: %s...)", STARGIT_API_KEY[:8] if STARGIT_API_KEY else "None")
+    if not access_token or not SERVER_UUID:
+        logger.error("No valid access token or server UUID; registration aborted (key: %s...)", STARGIT_API_KEY[:8] if STARGIT_API_KEY else "None")
         return
     else:
         logger.info("Valid access token recieved %s: ", access_token)
@@ -2298,7 +2311,7 @@ def register_with_stargit(event_type='online'):
     try:
         metrics = collect_server_metrics() if event_type == 'heartbeat' else {}
         payload = {
-            "server_uuid": tokens['api_key_uuid'],
+            "server_uuid": SERVER_UUID,
             "event_type": event_type,
             "status": "online",
             "metrics": metrics,
@@ -2420,11 +2433,11 @@ def poll_for_tasks(results=None):
     if not STARGIT_API_KEY:
         return []
     access_token = get_access_token()
-    if not access_token or not tokens['api_key_uuid']:
-        logger.error("No valid access token for poll")
+    if not access_token or not SERVER_UUID:
+        logger.error("No valid access token or server UUID for poll")
         return []
     payload = {
-        "server_uuid": tokens['api_key_uuid'],
+        "server_uuid": SERVER_UUID,
         "event_type": "poll",
         "timestamp": time.time(),
         "results": results or []
@@ -2467,11 +2480,16 @@ def poll_thread():
     results = []  # Start with empty
     while True:
         tasks = poll_for_tasks(results)
-        results = process_tasks(tasks)
-        time.sleep(5)  # Every 5 seconds; adjust via env var if needed
+        if tasks:
+            results = process_tasks(tasks)
+            # Immediately send results
+            poll_for_tasks(results)  # Send results immediately by polling again with results
+            results = []  # Clear after sending
+        time.sleep(1.0)  # Every 5 seconds; adjust via env var if needed
 
 # Start registration thread
 if STARGIT_API_KEY:
+    logger.info("Loaded STARBRIDGE_SERVER_UUID: %s", SERVER_UUID)
     threading.Thread(target=registration_thread, daemon=True).start()
     threading.Thread(target=poll_thread, daemon=True).start()
 
