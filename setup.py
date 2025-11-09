@@ -1,6 +1,7 @@
 import os
 import secrets
 import uuid
+import json
 from pathlib import Path
 
 def generate_api_key(length=32):
@@ -10,6 +11,39 @@ def generate_api_key(length=32):
 def generate_server_uuid():
     """Generate a persistent UUID for this server instance."""
     return str(uuid.uuid4())
+
+def generate_env_file():
+    # Auto-generate .env if missing
+    env_path = Path('.env')
+    if not env_path.exists():
+        # Generate credentials
+        api_key = generate_api_key()
+        server_uuid = generate_server_uuid()
+        with open(env_path, 'w') as f:
+            f.write(f"STARBRIDGE_API_KEY={api_key}\n")
+            f.write(f"STARBRIDGE_SERVER_UUID={server_uuid}\n")
+            f.write("GIT_VERBOSE=false\n")
+            f.write("PUSH_MODE=false\n")
+            f.write("SSL_MODE=adhoc\n") 
+            f.write("ENABLE_FRONTEND=true\n")  # Default enabled
+        print("Generated .env with API key and server UUID.")
+        return api_key, server_uuid
+    return None, None
+
+def generate_settings_json():
+    settings_path = Path('settings.json')
+    if not settings_path.exists():
+        default_settings = {
+            "git_executable": "/usr/bin/git",
+            "repositories": [],
+            "ssl": {
+                "cert_path": "",
+                "key_path": ""
+            }
+        }
+        with open(settings_path, 'w') as f:
+            json.dump(default_settings, f, indent=4)
+        print("Generated default settings.json.")
 
 def ensure_gitignore_includes_env():
     """Ensure .env is in .gitignore to prevent accidental commits."""
@@ -30,36 +64,31 @@ def ensure_gitignore_includes_env():
 
 def setup_starbridge():
     """Set up StarBridge by creating a .env file with a secure API key and server UUID."""
-    env_path = Path('.env')
 
-    if env_path.exists():
-        print("⚠️  A .env file already exists. To regenerate the API key or server UUID, delete .env and rerun this script.")
-        return
-
-    # Generate credentials
-    api_key = generate_api_key()
-    server_uuid = generate_server_uuid()
-
-    # Write to .env
-    with open(env_path, 'w') as f:
-        f.write(f"STARBRIDGE_API_KEY={api_key}\n")
-        f.write(f"STARBRIDGE_SERVER_UUID={server_uuid}\n")
-
+    api_key, server_uuid = generate_env_file()
+    generate_settings_json()
     # Ensure .env is protected from git
     ensure_gitignore_includes_env()
 
     # Print summary
     print("\n🚀 StarBridge setup complete!")
-    print(f"🔑 API key: {api_key}")
-    print(f"🆔 Server UUID: {server_uuid}")
-    print("\n⚠️  Store these values securely! They uniquely identify this server instance.")
+    if api_key and server_uuid:
+        print(f"🔑 API key: {api_key}")
+        print(f"🆔 Server UUID: {server_uuid}")
+        print("\n⚠️  Store these values securely! They uniquely identify this server instance.")
+    
     print("\nNext steps:")
-    print("1. Copy 'example-settings.json' to 'settings.json' and configure your repository paths and SSL settings.")
+    print("1. Edit 'settings.json' to configure your repository paths and SSL settings.")
     print("2. Ensure your SSL certificates are correctly set up as specified in settings.json.")
     print("3. Run the application: `python app.py` or enable the starbridge.service systemd unit.")
     print("4. The API key will be used for authentication, and the server UUID will identify this instance to Stargit.")
 
 
 if __name__ == '__main__':
-    print("Starting StarBridge setup...")
+    print("Starting StarBridge command-line setup...")
     setup_starbridge()
+else:
+    print("Starting StarBridge auto-setup...")
+    generate_env_file
+    generate_settings_json()
+    ensure_gitignore_includes_env()

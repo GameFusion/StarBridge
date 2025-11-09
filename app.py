@@ -19,6 +19,9 @@ from datetime import datetime, timedelta
 import mimetypes
 import base64 
 
+# auto-setup, will create .env and settings.json if not present
+import setup
+
 # Configure logging
 logging.basicConfig(
     level=logging.DEBUG,
@@ -29,6 +32,8 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger('StarBridge')
+
+
 
 # Load environment variables from .env file
 load_dotenv()
@@ -2430,6 +2435,57 @@ def get_file_history(repo_path, file_path, ref='HEAD'):
         history.append(current_commit)
     return history
 
+def get_commit_diff(repo_path, commit_sha):
+    try:
+        # Get name-status
+        command = [GIT_EXECUTABLE, "-C", repo_path, "diff", "--name-status", f"{commit_sha}^..{commit_sha}"]
+        output = run_git_command(repo_path, command)
+        if output.startswith("Error:"):
+            logger.warning("Failed to get name-status for commit %s in %s", commit_sha, repo_path)
+            return None
+        changed_files = []
+        for line in output.splitlines():
+            if line.strip():
+                parts = line.split('\t')
+                status = parts[0]
+                if status.startswith('R'):
+                    old_file, new_file = parts[1], parts[2]
+                    changed_files.append({'old_filename': old_file, 'filename': new_file, 'status': 'renamed', 'additions': 0, 'deletions': 0, 'binary': False, 'old_content': None, 'new_content': None})
+                else:
+                    filename = parts[1]
+                    changed_files.append({'filename': filename, 'status': {'A': 'added', 'M': 'modified', 'D': 'deleted'}.get(status, 'unknown'), 'additions': 0, 'deletions': 0, 'binary': False, 'old_content': None, 'new_content': None})
+
+        # Get numstat
+        command = [GIT_EXECUTABLE, "-C", repo_path, "diff", "--numstat", f"{commit_sha}^..{commit_sha}"]
+        output = run_git_command(repo_path, command)
+        num_map = {}
+        for line in output.splitlines():
+            if line.strip():
+                add, del_, file = line.split('\t')
+                num_map[file] = {'additions': int(add) if add != '-' else 0, 'deletions': int(del_) if del_ != '-' else 0}
+
+        # Get contents
+        for f in changed_files:
+            filename = f['filename']
+            f['additions'] = num_map.get(filename, {}).get('additions', 0)
+            f['deletions'] = num_map.get(filename, {}).get('deletions', 0)
+            if f['status'] != 'deleted':
+                command = [GIT_EXECUTABLE, "-C", repo_path, "show", f"{commit_sha}:{filename}"]
+                output = run_git_command(repo_path, command)
+                f['new_content'] = output if not output.startswith("Error:") else None
+            if f['status'] != 'added':
+                old_filename = f.get('old_filename', filename)
+                command = [GIT_EXECUTABLE, "-C", repo_path, "show", f"{commit_sha}^:{old_filename}"]
+                output = run_git_command(repo_path, command)
+                f['old_content'] = output if not output.startswith("Error:") else None
+            if f['old_content'] is None and f['new_content'] is None:
+                f['binary'] = True
+
+        return changed_files
+    except Exception as e:
+        logger.error(f"Error getting commit diff for {commit_sha}: {str(e)}")
+        return None
+    
 # Process tasks from poll response - handles 'get_file' and 'get_file_history' actions
 def process_tasks(tasks):
     logger.debug(f"Processing {len(tasks)} tasks")
@@ -2467,6 +2523,15 @@ def process_tasks(tasks):
             else:
                 results.append({"task_id": task['id'], "result": {"history": history}, "error": None})
         
+        elif action == 'get_commit_diff':
+            commit_sha = params.get('commit_sha')
+            logger.debug(f"get_commit_diff params: repo={repo_name}, sha={commit_sha}")
+            files = get_commit_diff(repo_path, commit_sha)
+            if files is None:
+                results.append({"task_id": task['id'], "result": None, "error": "Failed to fetch commit diff"})
+            else:
+                results.append({"task_id": task['id'], "result": {"files": files}, "error": None})
+
         else:
             logger.warning(f"Unknown action: {action}")
             results.append({"task_id": task['id'], "result": None, "error": f"Unknown action: {action}"})
@@ -2540,7 +2605,39 @@ if STARGIT_API_KEY:
     threading.Thread(target=registration_thread, daemon=True).start()
     threading.Thread(target=poll_thread, daemon=True).start()
 
-# Main entry point for running the server
+# Endpoins for web server querying status and configuration
+# TODO : Secure these endpoints with authentication if exposed publicly
+@app.route('/internal/stats', methods=['GET'])
+def internal_stats():
+    # Uptime
+    uptime = time.time() - psutil.Process(os.getpid()).create_time()
+    # Metrics (reuse collect_server_metrics if exists, or simple)
+    metrics = {
+        'uptime_seconds': uptime,
+        'cpu_percent': psutil.cpu_percent(),
+        'memory_percent': psutil.virtual_memory().percent,
+        # Add more from your collect_server_metrics
+    }
+    return jsonify(metrics)
+
+# TODO : Secure these endpoints with authentication if exposed publicly
+@app.route('/internal/logs', methods=['GET'])
+def internal_logs():
+    log_path = 'starbridge.log'
+    if os.path.exists(log_path):
+        with open(log_path, 'r') as f:
+            lines = f.readlines()[-100:]  # Last 100 lines
+        return jsonify({'logs': ''.join(lines)})
+    return jsonify({'logs': 'No logs found'})
+
+# Main entry point for running the web-server for monitoring and configuration frontend
+ENABLE_FRONTEND = os.getenv('ENABLE_FRONTEND', 'true').lower() == 'true'
+if ENABLE_FRONTEND:
+    def start_frontend():
+        subprocess.Popen(['python', 'frontend.py'])
+    threading.Thread(target=start_frontend, daemon=True).start()
+    logger.info("Frontend enabled and started on http://localhost:5002")
+
 if __name__ == '__main__':
     logger.info("Starting StarBridge server")
     if SSL_MODE and SSL_MODE == 'adhoc':
