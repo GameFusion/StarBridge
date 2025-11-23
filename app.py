@@ -3070,7 +3070,7 @@ def process_tasks(tasks):
                             "diff": diff_data
                         }
                     })
-                    logger.info(f"Commit successful: {message}")
+                    logger.info(f"Commit successful: {repo_path}")
 
                 else:
                     logger.error(
@@ -3092,7 +3092,91 @@ def process_tasks(tasks):
                 logger.exception("Exception during commit")
                 results.append({"task_id": task['id'], "error": str(e)})
                 continue
-                
+
+        elif action == "pull":
+            logger.info(f"[StarBridge] Pull requested for {repo_path}")
+
+            remote = params.get('remote', 'origin')
+            branch = params.get('branch')
+
+            if not branch:
+                results.append({"task_id": task['id'], "error": "Branch not specified"})
+                continue
+
+            # --- 1. Capture old HEAD (may be empty on very first commit) ---
+            try:
+                old_head = run_git_command(repo_path, [GIT_EXECUTABLE, "-C", repo_path, "rev-parse", "HEAD"]).strip()
+                if old_head.startswith("Error:") or not old_head:
+                    old_head = None
+            except Exception:
+                logger.warning(f"Failed to get old HEAD: {e}")
+                old_head = None  # repo with no commits
+
+            logger.info(f"[StarBridge] Old HEAD: {old_head or 'none (empty repo)'}")
+
+            # --- 2. Prepare pull command ---
+            pull_cmd = [
+                GIT_EXECUTABLE,
+                "-C", repo_path,
+                "pull",
+                "--ff-only",     # Safer: reject merge commits unless explicitly allowed
+                remote, branch
+            ]
+
+            # --- 3. Execute pull ---
+            result = subprocess.run(pull_cmd, capture_output=True, text=True)
+
+            if result.returncode != 0:
+                # Combine stdout + stderr for more info
+                error_msg = (result.stderr.strip() + "\n" + result.stdout.strip()).strip() or "Unknown pull error"
+                logger.error(f"[StarBridge] Pull failed for {repo_path} ({remote}/{branch}): {error_msg}")
+                results.append({
+                    "task_id": task['id'],
+                    "error": "pull_failed: " + error_msg,
+                    "remote": remote,
+                    "branch": branch
+                })
+                continue
+
+            # --- 4. Determine new HEAD ---
+            try:
+                new_head = run_git_command(repo_path, [GIT_EXECUTABLE, "-C", repo_path, "rev-parse", "HEAD"]).strip()
+                if new_head.startswith("Error:"):
+                    new_head = None
+            except Exception:
+                new_head = None
+
+            logger.info(f"[StarBridge] New HEAD: {new_head}")
+
+            # --- 5. Detect newly fetched commits + live diff ---
+            new_commits, diff_data = [], None
+
+            if old_head != new_head and new_head is not None:
+                # Only compute diff when HEAD changed
+                try:
+                    new_head, new_commits, diff_data = get_new_commits_and_diff(repo_path, old_head)
+                except Exception as e:
+                    logger.exception(f"[StarBridge] Failed computing commits/diff: {e}")
+
+            # --- 6. Build final response ---
+            task_result.update({
+                "result": {
+                    "status": "pulled",
+                    "remote": remote,
+                    "branch": branch,
+                    "old_head": old_head,
+                    "new_head": new_head,
+                    "new_commits": new_commits or [],
+                    "diff": diff_data,
+                    "pull_output": result.stdout.strip()
+                }
+            })
+
+            logger.info(
+                f"[StarBridge] Pull completed for {repo_path} ({remote}/{branch}): "
+                f"{len(new_commits or [])} new commits."
+            )
+            
         else:
             logger.warning(f"Unknown action: {action}")
             results.append({"task_id": task['id'], "result": None, "error": f"Unknown action: {action}"})
