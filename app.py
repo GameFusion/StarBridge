@@ -3265,6 +3265,22 @@ def process_tasks(tasks):
                 logger.exception(f"Exception during reset_hard: {str(e)}")
                 results.append({"task_id": task['id'], "error": str(e)})
                 
+        elif action == "get_status":
+
+            try:
+                logger.info(f"[StarBridge] Getting status for repo: {repo_name}")
+                output = run_git_command(repo_path, [GIT_EXECUTABLE, "-C", repo_path, "status"])
+                output = output.strip()  # Remove leading/trailing newlines
+
+                task_result.update({
+                    "result": {
+                        "status_output": output
+                    }
+                })
+            except Exception as e:
+                logger.exception(f"[StarBridge] Exception while getting status for {repo_name}")
+                results.append({"task_id": task['id'], "error": str(e)})
+
         else:
             logger.warning(f"Unknown action: {action}")
             results.append({"task_id": task['id'], "result": None, "error": f"Unknown action: {action}"})
