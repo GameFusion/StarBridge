@@ -796,6 +796,40 @@ def commit():
             "details": e.stderr.decode() if e.stderr else str(e)
         }), 500
 
+def get_ahead_behind(repo_path, git_executable="git"):
+    """Return (ahead, behind) counts for current branch vs its upstream"""
+    try:
+        # Get current branch name
+        branch_result = subprocess.run(
+            [git_executable, "-C", repo_path, "symbolic-ref", "--short", "HEAD"],
+            capture_output=True, text=True
+        )
+        if branch_result.returncode != 0:
+            return 0, 0  # Detached HEAD or error
+        branch = branch_result.stdout.strip()
+
+        # Get upstream for this branch
+        upstream_result = subprocess.run(
+            [git_executable, "-C", repo_path, "rev-parse", "--abbrev-ref", f"{branch}@{{u}}"],
+            capture_output=True, text=True
+        )
+        if upstream_result.returncode != 0:
+            return 0, 0  # No upstream set
+
+        upstream = upstream_result.stdout.strip()
+
+        # Count commits
+        count_result = subprocess.run(
+            [git_executable, "-C", repo_path, "rev-list", "--left-right", "--count", f"{upstream}...HEAD"],
+            capture_output=True, text=True, check=True
+        )
+        if count_result.stdout.strip():
+            behind, ahead = map(int, count_result.stdout.strip().split())
+            return ahead, behind
+    except Exception as e:
+        logger.debug(f"Failed to compute ahead/behind: {e}")
+    return 0, 0
+
 def get_git_status_data(repo_path, git_executable="git"):
     """
     Full Git status with staged/unstaged/conflicts support using porcelain=v2.
@@ -818,7 +852,9 @@ def get_git_status_data(repo_path, git_executable="git"):
             "renamed": [],
             "added": [],       # New files staged
             "modified": [],    # Modified files (legacy)
-            "deleted": []      # Deleted files
+            "deleted": [],      # Deleted files
+            "ahead": 0,
+            "behind": 0
         }
 
         merge_head = os.path.exists(os.path.join(repo_path, '.git', 'MERGE_HEAD'))
@@ -872,6 +908,11 @@ def get_git_status_data(repo_path, git_executable="git"):
             elif code == "?":  # Untracked
                 path = " ".join(parts[1:])
                 summary["untracked"].append(path)
+
+        # Compute ahead/behind — only for current branch
+        ahead, behind = get_ahead_behind(repo_path, git_executable)
+        summary["ahead"] = ahead
+        summary["behind"] = behind
 
         # Smart action message
         conflict_count = len(summary["conflicts"])
