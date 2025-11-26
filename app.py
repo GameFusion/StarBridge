@@ -795,6 +795,7 @@ def commit():
             "error": "Git command failed",
             "details": e.stderr.decode() if e.stderr else str(e)
         }), 500
+
 def get_ahead_behind(repo_path, git_executable="git", timeout=15):
     """
     Return (ahead, behind) counts for current branch vs its actual upstream.
@@ -2195,6 +2196,29 @@ def safe_rev_parse(repo_path, ref):
         return None
     return result.strip()
 
+def compute_diff_stats(diff_chunks):
+    added = 0
+    removed = 0
+
+    for chunk in diff_chunks:
+        # Split into lines safely
+        lines = chunk.split("\n")
+
+        for line in lines:
+            # Ignore metadata lines
+            if line.startswith("---") or line.startswith("+++"):
+                continue
+            if line.startswith("@@"):
+                continue
+
+            # Count added/removed lines
+            if line.startswith("+"):
+                added += 1
+            elif line.startswith("-"):
+                removed += 1
+
+    return added, removed
+
 def get_diff(repo_path):
     try:
         git_command = [GIT_EXECUTABLE, "-C", repo_path, "diff"]
@@ -2204,9 +2228,19 @@ def get_diff(repo_path):
             return {}
         else:
             diff_output = result.stdout
+
+            # Default stats
+            added = 0
+            removed = 0
+            if diff_output:
+                added, removed = compute_diff_stats(diff_output)
+
             return {
-                "diff":diff_output  
-                }
+                "diff":diff_output,
+                "lines_added": added,
+                "lines_removed": removed
+            }
+        
     except Exception as e:
         logger.error("get_diff(): Exception computing diff: %s", str(e))
         return {}
