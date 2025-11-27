@@ -42,7 +42,7 @@ def generate_env_file():
     # Ensure other defaults
     defaults = {
         "GIT_VERBOSE": "false",
-        "PUSH_MODE": "false",
+        "PUSH_MODE": "true",
         "SSL_MODE": "adhoc",
         "ENABLE_FRONTEND": "true"
     }
