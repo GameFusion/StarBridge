@@ -2946,7 +2946,17 @@ def process_tasks(tasks):
         "commit",
         "reset",            # future
         "checkout_file",    # future
-        "push"
+        "push",
+        "pull"
+    }
+
+    HEADS_CHANGING_ACTIONS = {
+        "continue_merge",
+        "commit",
+        "reset",            # future
+        "checkout_file",    # future
+        "push",
+        "pull"
     }
 
     for task in tasks:
@@ -2963,6 +2973,7 @@ def process_tasks(tasks):
         
         task_result = {"task_id": task['id'], 'repo_name': repo_name}
         needs_status_refresh = action in STATUS_CHANGING_ACTIONS
+        needs_heads_refresh = action in HEADS_CHANGING_ACTIONS
 
         if action == 'get_file':
             file_path = params.get('file_path')
@@ -3526,6 +3537,14 @@ def process_tasks(tasks):
             logger.warning(f"Unknown action: {action}")
             results.append({"task_id": task['id'], "result": None, "error": f"Unknown action: {action}"})
             continue
+
+        # === AUTO-REFRESH AHEADS AND BEHIND ON HEADS-CHANGING ACTIONS ===
+        if needs_heads_refresh:
+            ahead, behind = get_ahead_behind(repo_path)
+            if "result" not in task_result:
+                task_result["result"] = {}
+            task_result["result"]["ahead"] = ahead
+            task_result["result"]["behind"] = behind
 
         # === AUTO-REFRESH STATUS ON STATUS-CHANGING ACTIONS ===
         if needs_status_refresh:
