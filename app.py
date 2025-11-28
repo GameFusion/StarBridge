@@ -797,110 +797,94 @@ def commit():
             "details": e.stderr.decode() if e.stderr else str(e)
         }), 500
 
-def get_ahead_behind(repo_path, git_executable="git", timeout=15):
+def get_ahead_behind(repo_path, git="git", timeout=10):
     """
-    Return (ahead, behind) counts for current branch vs its actual upstream.
-    Always fetches the correct remote. Heavy logging for visibility.
+    Fully failsafe ahead/behind resolver.
+    Handles: no upstream, mismatched names, no remotes, detached HEAD.
     """
-    logger.debug(f"get_ahead_behind() called for repo: {repo_path}")
+    logger.debug(f"[ahead/behind] repo={repo_path}")
 
     try:
-        # Step 1: Get current branch
-        logger.debug("Step 1: Resolving current branch with symbolic-ref")
-        branch_result = subprocess.run(
-            [git_executable, "-C", repo_path, "symbolic-ref", "--short", "HEAD"],
-            capture_output=True, text=True, timeout=10
+        # STEP 1 — Find current branch (may be detached)
+        r = subprocess.run(
+            [git, "-C", repo_path, "symbolic-ref", "--short", "HEAD"],
+            capture_output=True, text=True, timeout=timeout
         )
-
-        if branch_result.returncode != 0:
-            logger.info(f"Detached HEAD or no branch in {repo_path} (symbolic-ref failed)")
+        if r.returncode != 0:
+            logger.info(f"[ahead/behind] Detached HEAD → return (0,0)")
             return 0, 0
 
-        branch = branch_result.stdout.strip()
-        if not branch:
-            logger.info(f"Empty branch name in {repo_path}")
-            return 0, 0
+        branch = r.stdout.strip()
+        logger.debug(f"[ahead/behind] branch={branch}")
 
-        logger.debug(f"Current branch: {branch}")
-
-        # Step 2: Get upstream tracking branch
-        logger.debug(f"Step 2: Resolving upstream for branch '{branch}' using {branch}@{{u}}")
-        upstream_result = subprocess.run(
-            [git_executable, "-C", repo_path, "rev-parse", "--abbrev-ref", f"{branch}@{{u}}"],
-            capture_output=True, text=True, timeout=10
-        )
-
-        if upstream_result.returncode != 0:
-            logger.info(f"No upstream configured for branch '{branch}' in {repo_path}")
-            return 0, 0
-
-        upstream = upstream_result.stdout.strip()
-        if not upstream or "/" not in upstream:
-            logger.warning(f"Invalid upstream format: '{upstream}' in {repo_path}")
-            return 0, 0
-
-        remote_name = upstream.split("/", 1)[0]
-        logger.debug(f"Upstream resolved: {upstream} → remote = {remote_name}")
-
-        # Step 3: Fetch the correct remote
-        logger.debug(f"Step 3: Fetching remote '{remote_name}' (--no-tags --prune --quiet)")
-        fetch_cmd = [
-            git_executable, "-C", repo_path,
-            "fetch", remote_name,
-            "--no-tags", "--prune", "--prune-tags", "--quiet"
-        ]
-        fetch_result = subprocess.run(
-            fetch_cmd,
+        # STEP 2 — Try explicit upstream
+        upstream_r = subprocess.run(
+            [git, "-C", repo_path, "rev-parse", "--abbrev-ref", f"{branch}@{{u}}"],
             capture_output=True, text=True, timeout=timeout
         )
 
-        if fetch_result.returncode != 0:
-            logger.warning(f"Fetch failed for remote '{remote_name}' in {repo_path}: {fetch_result.stderr.strip()}")
-            logger.debug("Falling back to fetching 'origin' as safety net")
-            fallback = subprocess.run(
-                [git_executable, "-C", repo_path, "fetch", "origin", "--quiet"],
+        if upstream_r.returncode == 0:
+            upstream = upstream_r.stdout.strip()
+            logger.debug(f"[ahead/behind] upstream={upstream} (explicit)")
+        else:
+            logger.info(f"[ahead/behind] No upstream for '{branch}' → falling back")
+
+            # STEP 3 — Fallback to origin/<branch>
+            upstream = f"origin/{branch}"
+
+            test = subprocess.run(
+                [git, "-C", repo_path, "rev-parse", "--verify", "--quiet", upstream],
                 capture_output=True, text=True, timeout=timeout
             )
-            if fallback.returncode == 0:
-                logger.debug("Fallback fetch of 'origin' succeeded")
-            else:
-                logger.warning(f"Even fallback fetch failed: {fallback.stderr.strip()}")
+            if test.returncode != 0:
+                logger.info(f"[ahead/behind] '{upstream}' does not exist → scanning remotes")
 
-        else:
-            logger.debug(f"Successfully fetched remote '{remote_name}'")
+                # STEP 4 — Try ANY remote that has this branch
+                remotes = subprocess.run(
+                    [git, "-C", repo_path, "remote"],
+                    capture_output=True, text=True, timeout=timeout
+                ).stdout.split()
 
-        # Step 4: Count ahead/behind
-        logger.debug(f"Step 4: Counting commits with rev-list --left-right --count {upstream}...HEAD")
-        count_cmd = [
-            git_executable, "-C", repo_path,
-            "rev-list", "--left-right", "--count",
-            f"{upstream}...HEAD"
-        ]
-        count_result = subprocess.run(
-            count_cmd,
-            capture_output=True, text=True, check=True, timeout=10
+                found = False
+                for remote in remotes:
+                    candidate = f"{remote}/{branch}"
+                    chk = subprocess.run(
+                        [git, "-C", repo_path, "rev-parse", "--verify", "--quiet", candidate],
+                        capture_output=True, text=True, timeout=timeout
+                    )
+                    if chk.returncode == 0:
+                        upstream = candidate
+                        found = True
+                        logger.debug(f"[ahead/behind] Using fallback remote branch: {upstream}")
+                        break
+
+                if not found:
+                    logger.info(f"[ahead/behind] No remote branch found for '{branch}' → (0,0)")
+                    return 0, 0
+
+        # STEP 5 — Fetch only the needed remote
+        remote = upstream.split("/")[0]
+        subprocess.run(
+            [git, "-C", repo_path, "fetch", remote, "--quiet", "--no-tags", "--prune"],
+            capture_output=True, text=True, timeout=timeout
         )
 
-        counts = count_result.stdout.strip()
-        behind, ahead = map(int, counts.split("\t"))
-        logger.info(
-            f"Sync status → {repo_path} | "
-            f"branch='{branch}' | upstream='{upstream}' | "
-            f"ahead={ahead} | behind={behind}"
+        # STEP 6 — Calculate ahead/behind (final robust step)
+        rr = subprocess.run(
+            [git, "-C", repo_path, "rev-list", "--left-right", "--count", f"{upstream}...HEAD"],
+            capture_output=True, text=True, timeout=timeout
         )
+
+        if rr.returncode != 0:
+            logger.warning(f"[ahead/behind] rev-list failed → return (0,0)")
+            return 0, 0
+
+        behind, ahead = map(int, rr.stdout.strip().split("\t"))
         return ahead, behind
 
-    except subprocess.TimeoutExpired as e:
-        logger.warning(f"Timeout in get_ahead_behind({repo_path}): {e}")
-    except subprocess.CalledProcessError as e:
-        logger.error(f"Git command failed in {repo_path}: {e.stderr.strip()}")
-    except ValueError as e:
-        logger.error(f"Failed to parse rev-list output in {repo_path}: {e} | output='{count_result.stdout}'")
     except Exception as e:
-        logger.exception(f"Unexpected error in get_ahead_behind({repo_path}): {e}")
-
-    logger.info(f"get_ahead_behind({repo_path}) → returning (0, 0) due to error")
-    return 0, 0
+        logger.exception(f"[ahead/behind] Unexpected error: {e}")
+        return 0, 0
 
 def get_git_status_data(repo_path, git_executable="git"):
     """
