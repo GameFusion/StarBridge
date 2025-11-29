@@ -2922,6 +2922,44 @@ def get_new_commits_and_diff(repo_path, old_head_sha=None):
         logger.error(f"Failed to get new commits/diff: {e}")
         return None, [], None
     
+def get_head(repo_path):
+    """
+    Safely returns the HEAD state.
+    Returns one of:
+        None                        → no commits yet
+        commit_hash                 → normal HEAD
+        ("DETACHED", commit_hash)   → detached HEAD state
+    """
+    try:
+        result = subprocess.run(
+            [GIT_EXECUTABLE, "-C", repo_path, "rev-parse", "HEAD"],
+            capture_output=True, text=True
+        )
+
+        if result.returncode != 0:
+            msg = (result.stderr + result.stdout).lower()
+            # Cases like: empty repo / no commits
+            if "unknown revision" in msg or "needed a single revision" in msg or "fatal:" in msg:
+                return None
+            return None
+
+        head_hash = result.stdout.strip()
+
+        # Detect detached HEAD
+        symbolic = subprocess.run(
+            [GIT_EXECUTABLE, "-C", repo_path, "symbolic-ref", "-q", "HEAD"],
+            capture_output=True, text=True
+        )
+
+        if symbolic.returncode != 0:  # Not pointing to refs/heads/* → detached
+            return ("DETACHED", head_hash)
+
+        return head_hash
+
+    except Exception as e:
+        logger.warning(f"[StarBridge] Failed to read HEAD: {e}")
+        return None
+    
 # Process tasks from poll response - handles 'get_file' and 'get_file_history' actions
 def process_tasks(tasks):
     logger.debug(f"Processing {len(tasks)} tasks")
@@ -3335,23 +3373,18 @@ def process_tasks(tasks):
                 results.append({"task_id": task['id'], "error": "Branch not specified"})
                 continue
 
-            # --- 1. Capture old HEAD (may be empty on very first commit) ---
-            try:
-                old_head = run_git_command(repo_path, [GIT_EXECUTABLE, "-C", repo_path, "rev-parse", "HEAD"]).strip()
-                if old_head.startswith("Error:") or not old_head:
-                    old_head = None
-            except Exception:
-                logger.warning(f"Failed to get old HEAD: {e}")
-                old_head = None  # repo with no commits
+            # --- 1. Capture old HEAD (supports empty repo + detached HEAD) ---
+            old_head = get_head(repo_path)
 
-            logger.info(f"[StarBridge] Old HEAD: {old_head or 'none (empty repo)'}")
+            if old_head is None:
+                logger.info("[StarBridge] Old HEAD: none (empty repo)")
+            elif isinstance(old_head, tuple):
+                logger.info(f"[StarBridge] Old HEAD: DETACHED at {old_head[1]}")
+            else:
+                logger.info(f"[StarBridge] Old HEAD: {old_head}")
 
             # --- 2. Prepare pull command ---
-            pull_cmd = [
-                GIT_EXECUTABLE,
-                "-C", repo_path,
-                "pull"
-            ]
+            pull_cmd = [GIT_EXECUTABLE, "-C", repo_path, "pull"]
 
             if pull_mode == "rebase":
                 pull_cmd.append("--rebase")
@@ -3359,7 +3392,7 @@ def process_tasks(tasks):
                 pull_cmd.append("--ff-only")
             elif pull_mode == "merge":
                 pull_cmd.append("--no-rebase")
-            else:
+            elif pull_mode is not None:
                 results.append({"task_id": task['id'], "error": f"Invalid pull_mode '{pull_mode}'"})
                 continue
                 
@@ -3371,8 +3404,13 @@ def process_tasks(tasks):
 
             if result.returncode != 0:
                 # Combine stdout + stderr for more info
-                error_msg = (result.stderr.strip() + "\n" + result.stdout.strip()).strip() or "Unknown pull error"
+                error_msg = "\n".join(filter(None, [
+                    result.stderr.strip(),
+                    result.stdout.strip()
+                ])) or "Unknown pull error"
+
                 logger.error(f"[StarBridge] Pull failed for {repo_path} ({remote}/{branch}): {error_msg}")
+                
                 results.append({
                     "task_id": task['id'],
                     "error": "pull_failed: " + error_msg,
@@ -3382,22 +3420,28 @@ def process_tasks(tasks):
                 continue
 
             # --- 4. Determine new HEAD ---
-            try:
-                new_head = run_git_command(repo_path, [GIT_EXECUTABLE, "-C", repo_path, "rev-parse", "HEAD"]).strip()
-                if new_head.startswith("Error:"):
-                    new_head = None
-            except Exception:
-                new_head = None
+            new_head = get_head(repo_path)
 
-            logger.info(f"[StarBridge] New HEAD: {new_head}")
+            if new_head is None:
+                logger.info("[StarBridge] New HEAD: none (still empty?)")
+            elif isinstance(new_head, tuple):
+                logger.info(f"[StarBridge] New HEAD: DETACHED at {new_head[1]}")
+            else:
+                logger.info(f"[StarBridge] New HEAD: {new_head}")
 
             # --- 5. Detect newly fetched commits + live diff ---
             new_commits, diff_data = [], None
 
-            if old_head != new_head and new_head is not None:
-                # Only compute diff when HEAD changed
+            # Only compute diff when a meaningful change occurred
+            def head_value(h):
+                return h[1] if isinstance(h, tuple) else h
+
+            if head_value(old_head) != head_value(new_head) and head_value(new_head) is not None:
                 try:
-                    new_head, new_commits, diff_data = get_new_commits_and_diff(repo_path, old_head)
+                    _, new_commits, diff_data = get_new_commits_and_diff(
+                        repo_path,
+                        head_value(old_head)
+                    )
                 except Exception as e:
                     logger.exception(f"[StarBridge] Failed computing commits/diff: {e}")
 
@@ -3408,7 +3452,9 @@ def process_tasks(tasks):
                     "remote": remote,
                     "branch": branch,
                     "old_head": old_head,
+                    "old_detached": isinstance(old_head, tuple),
                     "new_head": new_head,
+                    "new_detached": isinstance(new_head, tuple),
                     "new_commits": new_commits or [],
                     "diff": diff_data,
                     "pull_output": result.stdout.strip()
