@@ -864,10 +864,17 @@ def get_ahead_behind(repo_path, git="git", timeout=10):
 
         # STEP 5 — Fetch only the needed remote
         remote = upstream.split("/")[0]
-        subprocess.run(
-            [git, "-C", repo_path, "fetch", remote, "--quiet", "--no-tags", "--prune"],
-            capture_output=True, text=True, timeout=timeout
-        )
+        # Safe fetch — never allowed to crash
+        try:
+            subprocess.run(
+                [git, "-C", repo_path, "fetch", remote, "--quiet", "--no-tags", "--prune"],
+                capture_output=True, text=True, timeout=timeout
+            )
+            logger.debug(f"[ahead/behind] fetch '{remote}' OK")
+        except subprocess.TimeoutExpired:
+            logger.warning(f"[ahead/behind] fetch '{remote}' TIMED OUT → continuing without fetch")
+        except Exception as e:
+            logger.warning(f"[ahead/behind] fetch '{remote}' failed ({type(e).__name__}) → {e}")
 
         # STEP 6 — Calculate ahead/behind (final robust step)
         rr = subprocess.run(
