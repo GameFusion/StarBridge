@@ -19,9 +19,12 @@ from datetime import datetime, timedelta, timezone
 import mimetypes
 import base64 
 import socket
+import watchdog_live_diff
 
 # auto-setup, will create .env and settings.json if not present
 import setup
+import git_utils
+
 
 # Configure logging
 logging.basicConfig(
@@ -32,6 +35,11 @@ logging.basicConfig(
         logging.StreamHandler()
     ]
 )
+
+logging.getLogger("urllib3").setLevel(logging.WARNING)
+logging.getLogger("urllib3.connectionpool").setLevel(logging.WARNING)
+logging.getLogger("requests").setLevel(logging.WARNING)
+
 logger = logging.getLogger('StarBridge')
 
 
@@ -42,14 +50,12 @@ load_dotenv()
 app = Flask(__name__)
 
 # Load settings from the JSON file
-settings_file_path = os.path.join(os.path.dirname(__file__), 'settings.json')
-with open(settings_file_path) as settings_file:
-    settings = json.load(settings_file)
+import settings
 
-GIT_EXECUTABLE = settings.get("git_executable")
-REPOSITORIES = settings["repositories"]
-CERT_PATH = settings['ssl']['cert_path']
-KEY_PATH = settings['ssl']['key_path']
+GIT_EXECUTABLE = settings.get("git_executable", "git")
+REPOSITORIES = settings.get("repositories", [])
+CERT_PATH = settings.get("ssl.cert_path", "certs/cert.pem")      # dot notation
+KEY_PATH = settings.get("ssl.key_path", "certs/key.pem")
 
 STARGIT_API_KEY = os.getenv('STARGIT_API_KEY', '')
 STARGIT_API_URL = os.getenv('STARGIT_API_URL', 'https://stargit.com')
@@ -164,60 +170,6 @@ def run_git_command(path, command):
         logger.error("Git command error: %s", e.stderr.strip())
         return f"Error: {e.stderr.strip()}"
 
-def get_remote_heads(repo_path, timeout=3):
-    """
-    Safely return dict of remote refs:
-    {
-        'main': 'abc123...',
-        'feature/login': 'def456...'
-    }
-
-    Never blocks thanks to:
-    - timeout
-    - GIT_TERMINAL_PROMPT=0
-    - BatchMode=yes (no SSH password prompts)
-    """
-
-    remote_name = "origin"
-    remote_name = None
-
-    env = os.environ.copy()
-    env["GIT_TERMINAL_PROMPT"] = "0"     # Disable HTTPS prompts
-    env["GIT_SSH_COMMAND"] = "ssh -o BatchMode=yes"  # Disable SSH passphrases
-
-    if remote_name:
-        cmd = [GIT_EXECUTABLE, "-C", repo_path, "ls-remote", remote_name]
-    else:
-        cmd = [GIT_EXECUTABLE, "-C", repo_path, "ls-remote"]
-    try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            env=env,
-        )
-    except subprocess.TimeoutExpired:
-        return {"error": "timeout"}
-    except Exception as e:
-        return {"error": str(e)}
-
-    if result.returncode != 0:
-        return {"error": result.stderr.strip() or "ls-remote failed"}
-
-    heads = {}
-    for line in result.stdout.splitlines():
-        if "\t" not in line:
-            continue
-        sha, ref = line.split("\t", 1)
-
-        if ref.startswith("refs/heads/"):
-            heads[ref[len("refs/heads/"):]] = sha
-
-        elif ref.startswith(f"refs/remotes/{remote_name}/"):
-            heads[ref[len(f"refs/remotes/{remote_name}/"):]] = sha
-
-    return heads
 
 @app.route('/api/refs', methods=['POST'])
 def get_refs():
@@ -797,101 +749,6 @@ def commit():
             "details": e.stderr.decode() if e.stderr else str(e)
         }), 500
 
-def get_ahead_behind(repo_path, git="git", timeout=10):
-    """
-    Fully failsafe ahead/behind resolver.
-    Handles: no upstream, mismatched names, no remotes, detached HEAD.
-    """
-    logger.debug(f"[ahead/behind] repo={repo_path}")
-
-    try:
-        # STEP 1 — Find current branch (may be detached)
-        r = subprocess.run(
-            [git, "-C", repo_path, "symbolic-ref", "--short", "HEAD"],
-            capture_output=True, text=True, timeout=timeout
-        )
-        if r.returncode != 0:
-            logger.info(f"[ahead/behind] Detached HEAD → return (0,0)")
-            return 0, 0
-
-        branch = r.stdout.strip()
-        logger.debug(f"[ahead/behind] branch={branch}")
-
-        # STEP 2 — Try explicit upstream
-        upstream_r = subprocess.run(
-            [git, "-C", repo_path, "rev-parse", "--abbrev-ref", f"{branch}@{{u}}"],
-            capture_output=True, text=True, timeout=timeout
-        )
-
-        if upstream_r.returncode == 0:
-            upstream = upstream_r.stdout.strip()
-            logger.debug(f"[ahead/behind] upstream={upstream} (explicit)")
-        else:
-            logger.info(f"[ahead/behind] No upstream for '{branch}' → falling back")
-
-            # STEP 3 — Fallback to origin/<branch>
-            upstream = f"origin/{branch}"
-
-            test = subprocess.run(
-                [git, "-C", repo_path, "rev-parse", "--verify", "--quiet", upstream],
-                capture_output=True, text=True, timeout=timeout
-            )
-            if test.returncode != 0:
-                logger.info(f"[ahead/behind] '{upstream}' does not exist → scanning remotes")
-
-                # STEP 4 — Try ANY remote that has this branch
-                remotes = subprocess.run(
-                    [git, "-C", repo_path, "remote"],
-                    capture_output=True, text=True, timeout=timeout
-                ).stdout.split()
-
-                found = False
-                for remote in remotes:
-                    candidate = f"{remote}/{branch}"
-                    chk = subprocess.run(
-                        [git, "-C", repo_path, "rev-parse", "--verify", "--quiet", candidate],
-                        capture_output=True, text=True, timeout=timeout
-                    )
-                    if chk.returncode == 0:
-                        upstream = candidate
-                        found = True
-                        logger.debug(f"[ahead/behind] Using fallback remote branch: {upstream}")
-                        break
-
-                if not found:
-                    logger.info(f"[ahead/behind] No remote branch found for '{branch}' → (0,0)")
-                    return 0, 0
-
-        # STEP 5 — Fetch only the needed remote
-        remote = upstream.split("/")[0]
-        # Safe fetch — never allowed to crash
-        try:
-            subprocess.run(
-                [git, "-C", repo_path, "fetch", remote, "--quiet", "--no-tags", "--prune"],
-                capture_output=True, text=True, timeout=timeout
-            )
-            logger.debug(f"[ahead/behind] fetch '{remote}' OK")
-        except subprocess.TimeoutExpired:
-            logger.warning(f"[ahead/behind] fetch '{remote}' TIMED OUT → continuing without fetch")
-        except Exception as e:
-            logger.warning(f"[ahead/behind] fetch '{remote}' failed ({type(e).__name__}) → {e}")
-
-        # STEP 6 — Calculate ahead/behind (final robust step)
-        rr = subprocess.run(
-            [git, "-C", repo_path, "rev-list", "--left-right", "--count", f"{upstream}...HEAD"],
-            capture_output=True, text=True, timeout=timeout
-        )
-
-        if rr.returncode != 0:
-            logger.warning(f"[ahead/behind] rev-list failed → return (0,0)")
-            return 0, 0
-
-        behind, ahead = map(int, rr.stdout.strip().split("\t"))
-        return ahead, behind
-
-    except Exception as e:
-        logger.exception(f"[ahead/behind] Unexpected error: {e}")
-        return 0, 0
 
 def get_git_status_data(repo_path, git_executable="git"):
     """
@@ -973,7 +830,7 @@ def get_git_status_data(repo_path, git_executable="git"):
                 summary["untracked"].append(path)
 
         # Compute ahead/behind — only for current branch
-        ahead, behind = get_ahead_behind(repo_path, git_executable)
+        ahead, behind = git_utils.get_ahead_behind(repo_path, git_executable)
         summary["ahead"] = ahead
         summary["behind"] = behind
 
@@ -1974,8 +1831,10 @@ def collect_server_metrics():
 def get_access_token():
     """Fetch or refresh an access token."""
     global tokens
+    verbose = False
     if tokens['access_token'] and tokens['expires_at'] and datetime.utcnow() < tokens['expires_at'] - timedelta(seconds=60):
-        logger.debug("Using existing valid access token")
+        if verbose:
+            logger.debug("Using existing valid access token")
         return tokens['access_token']
 
     # Try refreshing if refresh_token exists
@@ -2114,7 +1973,7 @@ def collect_repo_details():
         else:
             repo["status"] = status_data
         
-        remote_heads = get_remote_heads(repo_path)
+        remote_heads = git_utils.get_remote_heads(repo_path)
         repo["remote_heads"] = remote_heads
 
         # Get remotes
@@ -2190,54 +2049,7 @@ def safe_rev_parse(repo_path, ref):
         return None
     return result.strip()
 
-def compute_diff_stats(diff_chunks):
-    added = 0
-    removed = 0
 
-    for chunk in diff_chunks:
-        # Split into lines safely
-        lines = chunk.split("\n")
-
-        for line in lines:
-            # Ignore metadata lines
-            if line.startswith("---") or line.startswith("+++"):
-                continue
-            if line.startswith("@@"):
-                continue
-
-            # Count added/removed lines
-            if line.startswith("+"):
-                added += 1
-            elif line.startswith("-"):
-                removed += 1
-
-    return added, removed
-
-def get_diff(repo_path):
-    try:
-        git_command = [GIT_EXECUTABLE, "-C", repo_path, "diff"]
-
-        result = subprocess.run(git_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        if result.returncode != 0:
-            return {}
-        else:
-            diff_output = result.stdout
-
-            # Default stats
-            added = 0
-            removed = 0
-            if diff_output:
-                added, removed = compute_diff_stats(diff_output)
-
-            return {
-                "diff":diff_output,
-                "lines_added": added,
-                "lines_removed": removed
-            }
-        
-    except Exception as e:
-        logger.error("get_diff(): Exception computing diff: %s", str(e))
-        return {}
 
 # Collect lightweight summaries DEPRECATED
 def collect_repo_summaries(include_remote=True):
@@ -2266,12 +2078,12 @@ def collect_repo_summaries(include_remote=True):
         if include_remote:
             print("[collect] get_remote_heads", flush=True)
             try:
-                remote_heads = get_remote_heads(repo_path, timeout=3)
+                remote_heads = git_utils.get_remote_heads(repo_path, timeout=3)
             except Exception as e:
                 print("[collect] remote head fetch failed:", e, flush=True)
 
-        diff = get_diff(repo_path)
-
+        diff = git_utils.get_diff(repo_path)
+   
         # Build structure
         summaries[repo_name] = {
             "heads": heads,
@@ -2324,14 +2136,14 @@ def collect_and_send_repo_summary(repo_path, include_remote=True):
         # 3. Remote heads (non-blocking)
         if include_remote:
             try:
-                remote_heads = get_remote_heads(repo_path, timeout=3)
+                remote_heads = git_utils.get_remote_heads(repo_path, timeout=3)
                 summary["remote_heads"] = remote_heads or {}
             except Exception as e:
                 logger.debug(f"[{repo_name}] Remote heads failed (normal): {e}")
 
         # 4. Working tree diff
         try:
-            diff = get_diff(repo_path)
+            diff = git_utils.get_diff(repo_path)
             summary["diff"] = diff or {"diff": "", "diff_info": {"original_size": 0}}
         except Exception as e:
             logger.error(f"[{repo_name}] Diff collection failed: {e}")
@@ -2883,7 +2695,7 @@ def get_new_commits_and_diff(repo_path, old_head_sha=None):
         # Get current HEAD
         current_head = run_git_command(repo_path, [GIT_EXECUTABLE, "-C", repo_path, "rev-parse", "HEAD"]).strip()
         if not current_head or current_head.startswith("Error:"):
-            return None, [], get_diff(repo_path)
+            return None, [], git_utils.get_diff(repo_path)
 
         new_commits = []
 
@@ -2914,7 +2726,7 @@ def get_new_commits_and_diff(repo_path, old_head_sha=None):
                 })
 
         # Get working tree diff
-        diff_data = get_diff(repo_path)
+        diff_data = git_utils.get_diff(repo_path)
 
         return current_head, new_commits, diff_data
 
@@ -3006,7 +2818,7 @@ def process_tasks(tasks):
 
         # Capture old/previous remote heads
         if action in HEADS_CHANGING_ACTIONS:
-            task["previous_remote_heads"] = get_remote_heads(repo_path) or {}
+            task["previous_remote_heads"] = git_utils.get_remote_heads(repo_path) or {}
 
         if action == 'get_file':
             file_path = params.get('file_path')
@@ -3500,7 +3312,7 @@ def process_tasks(tasks):
                     f.write(backup_msg)
                 # --- 4. Save current working tree diff ---
                 try:
-                    pre_diff = get_diff(repo_path)
+                    pre_diff = git_utils.get_diff(repo_path)
                     if pre_diff:
                         diff_file = os.path.join(backup_dir, f"{timestamp}_pre_reset_diff.diff")
                         with open(diff_file, "w", encoding="utf-8") as f:
@@ -3512,7 +3324,7 @@ def process_tasks(tasks):
 
                 # 2. Get diff before reset (for UI)
                 try:
-                    pre_diff = get_diff(repo_path)
+                    pre_diff = git_utils.get_diff(repo_path)
                 except Exception as e:
                     logger.warning(f"Failed to get pre-reset diff: {e}")
                     pre_diff = None
@@ -3535,7 +3347,7 @@ def process_tasks(tasks):
                     fresh_status = {}
 
                 try:
-                    post_diff = get_diff(repo_path)
+                    post_diff = git_utils.get_diff(repo_path)
                 except Exception as e:
                     logger.warning(f"Failed to get post-reset diff: {e}")
                     post_diff = None
@@ -3579,8 +3391,8 @@ def process_tasks(tasks):
             
             try:
                 # Optionally refresh ahead/behind
-                remote_heads = get_remote_heads(repo_path)
-                ahead, behind = get_ahead_behind(repo_path)
+                remote_heads = git_utils.get_remote_heads(repo_path)
+                ahead, behind = git_utils.get_ahead_behind(repo_path)
                 if "result" not in task_result:
                     task_result["result"] = {}
                 task_result.update({
@@ -3605,10 +3417,10 @@ def process_tasks(tasks):
         # === AUTO-REFRESH AHEADS AND BEHIND ON HEADS-CHANGING ACTIONS: Check if remote_heads changed ===
 
         if needs_heads_refresh or needs_status_refresh:
-            remote_heads = get_remote_heads(repo_path)
+            remote_heads = git_utils.get_remote_heads(repo_path)
 
         if needs_heads_refresh:
-            ahead, behind = get_ahead_behind(repo_path)
+            ahead, behind = git_utils.get_ahead_behind(repo_path)
             if "result" not in task_result:
                 task_result["result"] = {}
             task_result["result"]["ahead"] = ahead
@@ -3647,7 +3459,9 @@ def process_tasks(tasks):
 
 # Poll function (reuses your access_token logic)
 def poll_for_tasks(results=None):
-    logger.debug("Polling for tasks")
+    verbose = False
+    if verbose:
+        logger.debug("Polling for tasks")
     if not STARGIT_API_KEY:
         return []
     access_token = get_access_token()
@@ -3660,7 +3474,9 @@ def poll_for_tasks(results=None):
         "timestamp": time.time(),
         "results": results or []
     }
-    logger.debug(f"Sending payload: {payload}")
+    
+    if verbose:
+        logger.debug(f"Sending payload: {payload}")
     headers = {
         "Authorization": f"Bearer {access_token}",
         "Content-Type": "application/json"
@@ -3668,11 +3484,14 @@ def poll_for_tasks(results=None):
     endpoint = POLL_ENDPOINT
     try:
         response = requests.post(endpoint, json=payload, headers=headers)
-        logger.debug(f"Response status: {response.status_code}, body: {response.text}")
+        
+        if verbose:
+            logger.debug(f"Response status: {response.status_code}, body: {response.text}")
         if response.status_code == 200:
             data = response.json()
             tasks = data.get('tasks', [])
-            logger.debug(f"Received {len(tasks)} tasks: {tasks}")
+            if verbose:
+                logger.debug(f"Received {len(tasks)} tasks: {tasks}")
             return tasks
         elif response.status_code == 401:
             logger.warning("Token invalid; refreshing")
@@ -3747,6 +3566,20 @@ if ENABLE_FRONTEND:
         subprocess.Popen(['python', 'frontend.py'])
     threading.Thread(target=start_frontend, daemon=True).start()
     logger.info("Frontend enabled and started on http://localhost:5002")
+
+# At the very end (after app is created)
+def initialize_live_sync():
+    def get_token():
+        return get_access_token()  # your existing function
+
+    watchdog_live_diff.start_live_sync(
+        repositories=REPOSITORIES,
+        server_uuid=SERVER_UUID,
+        token_getter=get_token
+    )
+
+# Start it once
+threading.Thread(target=initialize_live_sync, daemon=True).start()
 
 if __name__ == '__main__':
     logger.info("Starting StarBridge server")
