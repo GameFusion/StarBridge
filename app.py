@@ -3408,6 +3408,68 @@ def process_tasks(tasks):
                     task_result["error"] = {}
                 task_result.update({"error": str(e)})
 
+        elif action == "run_ci":
+            start_time = time.time()
+            repo_name = params.get("repo_name")
+            event_name = params.get("event", "manual")
+            runner_id = params.get("runner_id")  # optional: specific runner
+
+            repo_path = find_repo_path_by_name(repo_name)
+            if not repo_path:
+                task_result.update({"error": "Repo not found"})
+                results.append(task_result)
+                continue
+
+            try:
+                logger.info(f"Running CI/CD for {repo_name} → event: {event_name}")
+
+                # Use your elite CI runner
+                cmd = [
+                    "venv/bin/python", "stargit_ci.py",
+                    str(repo_path),
+                    event_name
+                ]
+
+                result = subprocess.run(
+                    cmd,
+                    cwd=repo_path,
+                    capture_output=True,
+                    text=True,
+                    timeout=1800  # 30 min max
+                )
+
+                task_result.update({
+                    "result": {
+                        "status": "success" if result.returncode == 0 else "failed",
+                        "args": result.args,
+                        "exit_code": result.returncode,
+                        "stdout": result.stdout,
+                        "stderr": result.stderr,
+                        "duration_seconds": time.time() - start_time
+                    }
+                })
+
+                print("runner task result:", json.dumps({
+                    "args": result.args,
+                    "returncode": result.returncode,
+                    "stdout": result.stdout,
+                    "stderr": result.stderr
+                }, indent=4), flush=True)
+
+                if result.returncode == 0:
+                    logger.info(f"CI/CD succeeded for {repo_name}")
+                else:
+                    logger.error(f"CI/CD failed for {repo_name}: {result.stderr[:500]}")
+
+            except subprocess.TimeoutExpired:
+                task_result.update({
+                    "error": "CI/CD timed out after 30 minutes"
+                })
+                logger.error(f"CI/CD timeout for {repo_name}")
+            except Exception as e:
+                task_result.update({"error": str(e)})
+                logger.exception(f"CI/CD crashed for {repo_name}")
+
         else:
             logger.warning(f"Unknown action: {action}")
             results.append({"task_id": task['id'], "result": None, "error": f"Unknown action: {action}"})
