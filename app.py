@@ -3123,6 +3123,8 @@ def process_tasks(tasks):
 
         elif action == "commit":
             message = params.get('commit_message', '').strip()
+            name = params.get('name')
+            email = params.get('email')
 
             if not message:
                 results.append({"task_id": task['id'], "error": "Commit message required"})
@@ -3136,7 +3138,16 @@ def process_tasks(tasks):
                 if old_head_sha.startswith("Error:") or not old_head_sha:
                     old_head_sha = None  # First commit case
 
-                cmd = [GIT_EXECUTABLE, "-C", repo_path, "commit", "-a", "-m", message]
+
+
+
+                if name and email:
+                    author_info = f"{name} <{email}>"
+                    print("commiting with provided author info:", author_info, flush=True)
+                    cmd = [GIT_EXECUTABLE, "-C", repo_path, "commit", "--author", author_info, "-a", "-m", message]
+                else:
+                    cmd = [GIT_EXECUTABLE, "-C", repo_path, "commit", "-a", "-m", message]
+                
                 result = subprocess.run(cmd, capture_output=True, text=True)
 
                 if result.returncode == 0:
