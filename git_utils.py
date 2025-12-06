@@ -236,3 +236,15 @@ def get_remote_heads(repo_path, timeout=3):
             heads[ref[len(f"refs/remotes/{remote_name}/"):]] = sha
 
     return heads
+
+def get_current_commit_sha(repo_path: Path) -> str:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(repo_path), "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            check=True
+        )
+        return result.stdout.strip()
+    except:
+        return "unknown"

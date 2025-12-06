@@ -3438,6 +3438,8 @@ def process_tasks(tasks):
                     timeout=1800  # 30 min max
                 )
 
+                commit_sha = git_utils.get_current_commit_sha(repo_path)
+
                 task_result.update({
                     "result": {
                         "status": "success" if result.returncode == 0 else "failed",
@@ -3445,7 +3447,8 @@ def process_tasks(tasks):
                         "exit_code": result.returncode,
                         "stdout": result.stdout,
                         "stderr": result.stderr,
-                        "duration_seconds": time.time() - start_time
+                        "duration_seconds": time.time() - start_time,
+                        "commit_sha": commit_sha
                     }
                 })
 
