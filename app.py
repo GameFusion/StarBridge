@@ -2920,6 +2920,8 @@ def process_tasks(tasks):
                 params = task.get('params') or {}
                 repo_name = params.get('repo_name')
                 commit_message = params.get('commit_message')
+                name = params.get('name')
+                email = params.get('email')
 
                 # Validate parameters
                 if not repo_name:
@@ -2934,6 +2936,14 @@ def process_tasks(tasks):
                     results.append({"task_id": task["id"], "error": f"Repository '{repo_name}' not found"})
                     continue
 
+                # Prepare environment with committer identity
+                env = os.environ.copy()
+                if name and email:
+                    env["GIT_AUTHOR_NAME"] = name
+                    env["GIT_AUTHOR_EMAIL"] = email
+                    env["GIT_COMMITTER_NAME"] = name
+                    env["GIT_COMMITTER_EMAIL"] = email
+                    
                 # Detect merge or rebase in progress
                 git_dir = os.path.join(repo_path, ".git")
 
@@ -2964,7 +2974,7 @@ def process_tasks(tasks):
                     ]
 
                     merge_result = subprocess.run(
-                        merge_cmd, capture_output=True, text=True
+                        merge_cmd, capture_output=True, text=True, env=env
                     )
 
                     logger.debug({
@@ -3007,7 +3017,7 @@ def process_tasks(tasks):
                     ]
 
                     rebase_result = subprocess.run(
-                        rebase_cmd, capture_output=True, text=True
+                        rebase_cmd, capture_output=True, text=True, env=env
                     )
 
                     logger.debug({
