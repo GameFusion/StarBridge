@@ -3157,16 +3157,30 @@ def process_tasks(tasks):
                     logger.info(f"Commit successful: {repo_path}")
 
                 else:
+                    full_error = f"Commit failed (exit {result.returncode})\n\n"
+                    
+                    if result.stderr:
+                        full_error += "Git error output:\n"
+                        full_error += result.stderr.strip()
+                    else:
+                        full_error += "No error output from Git"
+                    
+                    if result.stdout:
+                        full_error += "\n\nGit output:\n"
+                        full_error += result.stdout.strip()
+
                     logger.error(
-                        f"Commit FAILED.\n"
+                        f"Commit FAILED for {repo_name}\n"
                         f"Command: {' '.join(cmd)}\n"
-                        f"STDOUT:\n{result.stdout}\n"
+                        f"Exit code: {result.returncode}\n"
                         f"STDERR:\n{result.stderr}\n"
+                        f"STDOUT:\n{result.stdout}"
                     )
 
                     results.append({
                         "task_id": task['id'],
-                        "error": "Commit failed",
+                        "error": full_error,
+                        "exit_code": result.returncode,
                         "stdout": result.stdout,
                         "stderr": result.stderr
                     })
