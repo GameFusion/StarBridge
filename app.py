@@ -3214,6 +3214,8 @@ def process_tasks(tasks):
             remote = params.get('remote', 'origin')
             branch = params.get('branch')
             pull_mode = params.get('pull_mode', 'ff-only')
+            name = params.get('name')
+            email = params.get('email')
 
             if not branch:
                 results.append({"task_id": task['id'], "error": "Branch not specified"})
@@ -3245,8 +3247,16 @@ def process_tasks(tasks):
             pull_cmd.append(remote)
             pull_cmd.append(branch)
             
+            # Prepare environment with committer identity
+            env = os.environ.copy()
+            if name and email:
+                env["GIT_AUTHOR_NAME"] = name
+                env["GIT_AUTHOR_EMAIL"] = email
+                env["GIT_COMMITTER_NAME"] = name
+                env["GIT_COMMITTER_EMAIL"] = email
+                
             # --- 3. Execute pull ---
-            result = subprocess.run(pull_cmd, capture_output=True, text=True)
+            result = subprocess.run(pull_cmd, capture_output=True, text=True, env=env)
 
             if result.returncode != 0:
                 # Combine stdout + stderr for more info
