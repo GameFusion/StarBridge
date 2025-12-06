@@ -2938,6 +2938,9 @@ def process_tasks(tasks):
 
                 # Prepare environment with committer identity
                 env = os.environ.copy()
+                env["GIT_EDITOR"] = "true"                    # ← No editor
+                env["GIT_TERMINAL_PROMPT"] = "0"              # ← No prompts
+                env["GIT_MERGE_AUTOEDIT"] = "no"              # ← No auto-edit
                 if name and email:
                     env["GIT_AUTHOR_NAME"] = name
                     env["GIT_AUTHOR_EMAIL"] = email
