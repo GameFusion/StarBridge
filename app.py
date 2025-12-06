@@ -3140,15 +3140,21 @@ def process_tasks(tasks):
 
 
 
+                env = os.environ.copy()
 
                 if name and email:
+                    env["GIT_AUTHOR_NAME"] = name
+                    env["GIT_AUTHOR_EMAIL"] = email
+                    env["GIT_COMMITTER_NAME"] = name
+                    env["GIT_COMMITTER_EMAIL"] = email
+
                     author_info = f"{name} <{email}>"
                     print("commiting with provided author info:", author_info, flush=True)
                     cmd = [GIT_EXECUTABLE, "-C", repo_path, "commit", "--author", author_info, "-a", "-m", message]
                 else:
                     cmd = [GIT_EXECUTABLE, "-C", repo_path, "commit", "-a", "-m", message]
                 
-                result = subprocess.run(cmd, capture_output=True, text=True)
+                result = subprocess.run(cmd, capture_output=True, text=True, env=env)
 
                 if result.returncode == 0:
 
