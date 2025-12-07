@@ -3340,17 +3340,8 @@ def process_tasks(tasks):
             target = params.get('target', 'HEAD')  # e.g. "HEAD~3" or commit SHA
 
             try:
-                # --- 1. Save current state as backup commit (undo safety) ---
+                # --- 1. Save current state as backup diff (undo safety) ---
                 backup_msg = f"StarGit backup before reset hard ({datetime.utcnow().isoformat()})"
-                backup_result = subprocess.run(
-                    [GIT_EXECUTABLE, "-C", repo_path, "commit", "--allow-empty", "-m", backup_msg],
-                    capture_output=True, text=True
-                )
-                if backup_result.returncode != 0:
-                    error_text = (backup_result.stderr or backup_result.stdout or "Failed to create backup commit").strip()
-                    logger.error(f"Backup commit failed: {error_text}")
-                    results.append({"task_id": task['id'], "error": "backup_commit_failed", "error_msg": error_text})
-                    continue
                 
                 now_utc = datetime.now(timezone.utc)
                 timestamp = now_utc.strftime("%Y-%m-%d_%H-%M-%S")
@@ -3410,7 +3401,8 @@ def process_tasks(tasks):
                     "result": {
                         "status": "reset_hard_complete",
                         "target": target,
-                        "backup_commit_message": backup_msg,
+                        "backup_message": f"Backup saved at {timestamp}",
+                        "backup_path": f".stargit/backups/{timestamp}",
                         "pre_reset_diff": pre_diff,
                         "post_reset_diff": post_diff,
                         "repo_status": fresh_status
