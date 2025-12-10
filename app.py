@@ -754,6 +754,7 @@ def get_git_status_data(repo_path, git_executable="git"):
     """
     Full Git status with staged/unstaged/conflicts support using porcelain=v2.
     """
+    logger.debug(f"Fetching git status for {repo_path}")
     try:
         # Use porcelain=v2 with -z for machine-readable, unambiguous output
         result = subprocess.run(
@@ -762,6 +763,7 @@ def get_git_status_data(repo_path, git_executable="git"):
             text=True,
             check=True
         )
+        logger.debug(f"Git status raw output ({len(result.stdout)} chars)")
         entries = [e for e in result.stdout.split('\0') if e]
 
         summary = {
@@ -783,58 +785,73 @@ def get_git_status_data(repo_path, git_executable="git"):
         merge_in_progress = merge_head or rebase_merge or rebase_apply
 
         branch_info = ""
-        for entry in entries:
+        logger.debug(f"Processing {len(entries)} git status entries")
+
+        for i, entry in enumerate(entries):
+            if not entry.strip():
+                logger.debug(f"Skipping empty entry at index {i}")
+                continue
+
             parts = entry.split()
-            if not parts:
+            if len(parts) < 2:
+                logger.warning(f"Malformed git status entry at index {i}: '{entry}' — skipping")
                 continue
 
             code = parts[0]
+            logger.debug(f"Entry {i}: code='{code}', full='{entry}'")
 
-            # Branch info line: # branch.oid ...
-            if code == "#":
-                if parts[1].startswith("branch.head"):
-                    branch_info = " ".join(parts[2:])
-                continue
+            try:
+                if code == "#":
+                    if parts[1].startswith("branch.head"):
+                        branch_info = " ".join(parts[2:])
+                        logger.debug(f"Detected branch: {branch_info}")
+                    continue
 
-            # Ordinary entry: 1 XY sub path
-            # u XY sub path (conflict)
-            # ? path (untracked)
-            if code in ("1", "2"):  # Ordinary entry
-                xy = parts[1]
-                path = " ".join(parts[8:]) if len(parts) > 8 else parts[-1]
+                if code in ("1", "2"):
+                    xy = parts[1]
+                    # Safe path extraction
+                    path_parts = parts[8:] if len(parts) > 8 else parts[8:9] if len(parts) > 8 else [parts[-1]]
+                    path = " ".join(path_parts)
 
-                # Staged changes (index != HEAD)
-                if xy[0] != ".":
-                    if xy[0] == "A":
-                        summary["added"].append(path)
-                    elif xy[0] == "M":
-                        summary["staged"].append(path)
-                    elif xy[0] == "D":
-                        summary["deleted"].append(path)
-                    elif xy[0] == "R":
-                        old, new = path.split(" -> ")
-                        summary["renamed"].append({"from": old.strip(), "to": new.strip()})
-                        summary["staged"].append(new.strip())
+                    # Staged
+                    if xy[0] != ".":
+                        if xy[0] == "A":
+                            summary["added"].append(path)
+                        elif xy[0] == "M":
+                            summary["staged"].append(path)
+                        elif xy[0] == "D":
+                            summary["deleted"].append(path)
+                        elif xy[0] == "R":
+                            try:
+                                old, new = path.split(" -> ")
+                                summary["renamed"].append({"from": old.strip(), "to": new.strip()})
+                                summary["staged"].append(new.strip())
+                            except:
+                                logger.warning(f"Failed to parse rename: {path}")
 
-                # Unstaged changes (worktree != index)
-                if xy[1] != ".":
-                    if xy[1] in ("M", "D"):
+                    # Unstaged
+                    if xy[1] != "." and xy[1] in ("M", "D"):
                         summary["unstaged"].append(path)
 
-            elif code == "u":  # Unmerged (conflict)
-                path = " ".join(parts[8:]) if len(parts) > 8 else parts[-1]
-                summary["conflicts"].append(path)
+                elif code == "u":
+                    path = " ".join(parts[8:]) if len(parts) > 8 else parts[-1]
+                    summary["conflicts"].append(path)
 
-            elif code == "?":  # Untracked
-                path = " ".join(parts[1:])
-                summary["untracked"].append(path)
+                elif code == "?":
+                    path = " ".join(parts[1:])
+                    summary["untracked"].append(path)
 
+            except Exception as e:
+                logger.error(f"CRASH parsing entry {i}: '{entry}' — {e}")
+                continue  # Don't die — keep going
         # Compute ahead/behind — only for current branch
+        logger.debug("Calculating ahead/behind status")
         ahead, behind = git_utils.get_ahead_behind(repo_path, git_executable)
         summary["ahead"] = ahead
         summary["behind"] = behind
 
         # Smart action message
+        logger.debug("Generating action summary and message")
         conflict_count = len(summary["conflicts"])
         staged_count = len(summary["staged"]) + len(summary["added"]) + len(summary["deleted"]) + len(summary["renamed"])
         unstaged_count = len(summary["unstaged"])
@@ -865,13 +882,15 @@ def get_git_status_data(repo_path, git_executable="git"):
             action_summary = "Up to date"
             action_message = "Working tree clean."
 
-        return {
+        status_dict = {
             "summary": summary,
             "action_summary": action_summary,
             "action_message": action_message,
             "merge_in_progress": merge_in_progress,
             "branch": branch_info or "HEAD"
-        }, None
+        }
+        logger.debug(f"Git status raw output {status_dict} chars)")
+        return status_dict, None
 
     except subprocess.CalledProcessError as e:
         error_msg = e.stderr.strip() or str(e)
@@ -880,6 +899,9 @@ def get_git_status_data(repo_path, git_executable="git"):
     except Exception as e:
         logger.error(f"Unexpected error in get_git_status_data({repo_path}): {str(e)}")
         return None, {"type": "Exception", "message": str(e)}
+    # fallback just in case
+    logger.error("Unknown error in get_git_status_data for %s", repo_path)
+    return None, {"type": "Exception", "message": "Unknown error"}
 
 @app.route('/api/status', methods=['POST'])
 def get_status():
