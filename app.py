@@ -2809,7 +2809,8 @@ def process_tasks(tasks):
         "reset",            # future
         "checkout_file",    # future
         "push",
-        "pull"
+        "pull",
+        "create_file"
     }
 
     HEADS_CHANGING_ACTIONS = {
@@ -2855,6 +2856,63 @@ def process_tasks(tasks):
                 #results.append({"task_id": task['id'], "result": content_data, "error": None})
                 task_result.update({"result": content_data, "error": None})
         
+        # In StarBridge process_tasks.py
+        elif action == "create_file":
+            
+            file_path = params.get("file_path")      # e.g. ".stargit/ci.yml"
+            content = params.get("content", "")
+            overwrite = params.get("overwrite", False)
+            git_add = params.get("git_add", False)
+            logger.debug(f"create_file params: repo={repo_name}, path={file_path}, overwrite={overwrite}")
+            
+            full_path = os.path.join(repo_path, file_path)
+
+            # Security: prevent path traversal
+            full_path = os.path.abspath(full_path)
+            repo_path_abs = os.path.abspath(repo_path)
+
+            if not full_path.startswith(repo_path_abs + os.sep):
+                task_result.update({"error": "Invalid file path (outside repo)"})
+                continue
+
+            try:
+                # Create parent directories
+                os.makedirs(os.path.dirname(full_path), exist_ok=True)
+
+                # Write file
+                mode = 'w' if overwrite else 'x'
+                with open(full_path, mode, encoding="utf-8") as f:
+                    f.write(content)
+
+                if git_add:
+                    add_result = subprocess.run(
+                        [GIT_EXECUTABLE, "-C", repo_path, "add", file_path],
+                        capture_output=True,
+                        text=True
+                    )
+
+                    if add_result.returncode == 0:
+                        logger.info(f"Auto-added {file_path} to index")
+                    else:
+                        logger.warning(f"git add failed for {file_path}: {add_result.stderr}")
+
+                task_result.update({
+                    "result": {
+                        "status": "file_created",
+                        "file_path": file_path,
+                        "git_added": git_add and add_result.returncode == 0,
+                        "size_bytes": len(content)
+                    }
+                })
+                
+                logger.info(f"Created file {file_path} in {repo_name}")
+
+            except FileExistsError:
+                task_result.update({"error": f"File {file_path} already exists (use overwrite=true)"})
+            except Exception as e:
+                task_result.update({"error": str(e)})
+                logger.error(f"Failed to create file {file_path}: {e}")
+
         elif action == 'get_file_history':
             file_path = params.get('file_path')
             commit_sha = params.get('commit_sha', 'HEAD')

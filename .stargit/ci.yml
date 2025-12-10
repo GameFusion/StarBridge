@@ -1,0 +1,14 @@
+# .stargit/ci.yml
+name: StarGit CI
+on: [push, pull]
+
+jobs:
+  test:
+    runs-on: starbridge
+    steps:
+      - name: Checkout
+        run: git fetch --all && git checkout $GITHUB_SHA
+      - name: Run tests
+        run: pytest -v
+
+
