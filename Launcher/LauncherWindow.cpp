@@ -5,6 +5,7 @@
 #include <QLabel>
 #include <QScrollBar>
 #include <QCloseEvent>
+#include <QRegularExpression>
 
 LauncherWindow::LauncherWindow(QWidget *parent)
     : QMainWindow(parent)
@@ -77,11 +78,29 @@ LauncherWindow::LauncherWindow(QWidget *parent)
     // Start process
     runner = new ProcessRunner(this);
     connect(runner, &ProcessRunner::logMessage, this, [this](const QString &msg, bool isError) {
+
+        logMessage(msg, isError);
+/*
         QTextCharFormat fmt;
         fmt.setForeground(isError ? Qt::red : Qt::green);
         logView->setCurrentCharFormat(fmt);
         logView->append(msg);
         logView->verticalScrollBar()->setValue(logView->verticalScrollBar()->maximum());
+*/
+
+    });
+
+    // In constructor — after creating logView
+    connect(logView->verticalScrollBar(), &QScrollBar::valueChanged, this, [this]() {
+        QScrollBar *sb = logView->verticalScrollBar();
+        bool nearBottom = (sb->maximum() - sb->value()) <= 100;
+
+        // Only disable auto-follow if user manually scrolled up
+        if (!nearBottom && autoFollow) {
+            autoFollow = false;
+            // Optional: show indicator
+            // statusBar()->showMessage("Auto-follow disabled");
+        }
     });
 
     runner->startStarBridge();
@@ -136,5 +155,61 @@ void LauncherWindow::onProcessStateChanged(QProcess::ProcessState state)
         pauseBtn->setEnabled(true);
         stopBtn->setEnabled(true);
         break;
+    }
+}
+
+// In your logMessage handler — ELITE VERSION
+void LauncherWindow::logMessage(const QString &rawText, bool isError)
+{
+    QString text = rawText;
+
+    // === 1. ESCAPE ALL HTML — THIS IS THE KEY ===
+    text = text.toHtmlEscaped();
+
+    // === 2. SAFE DIFF HIGHLIGHTING (using <span> with inline style) ===
+    text = text
+               // Hunk headers
+               .replace(QRegularExpression(R"(^(@@ .*? @@.*)$)"),
+                        R"(<span style="color:#79c0ff; font-weight:bold;">\1</span>)")
+               // Added lines
+               .replace(QRegularExpression(R"(^\+.*$)"),
+                        R"(<span style="color:#56d364; background:rgba(86,211,100,0.15);">\0</span>)")
+               // Removed lines
+               .replace(QRegularExpression(R"(^\-.*$)"),
+                        R"(<span style="color:#f85149; background:rgba(248,81,73,0.15);">\0</span>)")
+               // Context lines
+               .replace(QRegularExpression(R"(^ .*$)"),
+                        R"(<span style="color:#8b949e;">\0</span>)")
+               // File headers
+               .replace(QRegularExpression(R"(^diff --git.*$)"),
+                        R"(<span style="color:#8b949e; font-weight:bold;">\0</span>)")
+               .replace(QRegularExpression(R"(^index .*$)"),
+                        R"(<span style="color:#8b949e;">\0</span>)");
+
+    // === 3. PRESERVE LINE BREAKS ===
+    text = text.replace("\n", "<br>");
+
+    // === 4. APPLY LOG LEVEL COLOR ===
+    QString color = isError ? "#ff6b6b" : "#e6edf3";
+    if (text.contains("ERROR", Qt::CaseInsensitive)) color = "#ff6b6b";
+    else if (text.contains("WARNING", Qt::CaseInsensitive)) color = "#ffa657";
+    else if (text.contains("INFO", Qt::CaseInsensitive)) color = "#79c0ff";
+    else if (text.contains("DEBUG", Qt::CaseInsensitive)) color = "#8b949e";
+
+    // === 5. INSERT WITH SAFE STYLING ===
+    logView->append(QString("<span style='color:%1; font-family:Menlo,monospace;'>%2</span>")
+                        .arg(color, text));
+
+    // === MAX HISTORY ENFORCEMENT ===
+    QTextDocument *doc = logView->document();
+    int blockCount = doc->blockCount();
+
+    QTextCursor cursor = logView->textCursor();
+    cursor.movePosition(QTextCursor::Start);
+
+    if (blockCount > maxLogLines) {
+        cursor.movePosition(QTextCursor::Down, QTextCursor::KeepAnchor, blockCount - trimLogLines);
+        cursor.removeSelectedText();
+        cursor.deleteChar(); // remove extra newline
     }
 }

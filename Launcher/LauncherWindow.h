@@ -20,12 +20,18 @@ private slots:
     void onProcessStateChanged(QProcess::ProcessState state);
 
 private:
+
+    void logMessage(const QString &rawText, bool isError);
+
     QTextEdit *logView;
     QPushButton *playBtn;
     QPushButton *pauseBtn;
     QPushButton *stopBtn;
 
     ProcessRunner *runner;
-    //QProcess *pythonProcess;
+
+    int maxLogLines = 20000;     // Max history
+    int trimLogLines = 15000;     // Max history
+    bool autoFollow = false;       // Auto-scroll when new logs arrive
 };
 

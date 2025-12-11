@@ -750,7 +750,6 @@ def commit():
             "details": e.stderr.decode() if e.stderr else str(e)
         }), 500
 
-
 def get_git_status_data(repo_path, git_executable="git"):
     """
     Full Git status with staged/unstaged/conflicts support using porcelain=v2.
@@ -760,7 +759,7 @@ def get_git_status_data(repo_path, git_executable="git"):
         # Use porcelain=v2 with -z for machine-readable, unambiguous output
         # Use "--untracked-files=all" to list all untracked files
         result = subprocess.run(
-            [git_executable, "-C", repo_path, "status", "--untracked-files=all", "--porcelain=v2", "-z", "--branch"],
+            [git_executable, "-C", repo_path, "status", "--porcelain=v2", "-z", "--branch"],
             capture_output=True,
             text=True,
             check=True
