@@ -2,6 +2,8 @@
 #include <QObject>
 #include <QProcess>
 
+class QNetworkAccessManager;
+
 class ProcessRunner : public QObject
 {
     Q_OBJECT
@@ -23,6 +25,8 @@ private slots:
 
 private:
     void handleOutput(const QString &output);
+    void waitAndStart(QString port, QNetworkAccessManager *manager);
+    void startProcess();
 
     QProcess process;
 };

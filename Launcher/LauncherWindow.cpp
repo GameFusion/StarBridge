@@ -103,13 +103,53 @@ LauncherWindow::LauncherWindow(QWidget *parent)
         }
     });
 
+
+
+    //
+    // ===  SYSTEM TRAY ===
+    trayIcon = new QSystemTrayIcon(this);
+    trayIcon->setIcon(QIcon(":/resources/StarBridge.png"));
+    trayIcon->setToolTip("StarBridge");
+
+    QIcon icon(":/resources/helloServer.svg");
+    trayIcon->setIcon(icon);
+
+
+    trayMenu = new QMenu(this);
+
+    showAction = new QAction("Show Log Window", this);
+    quitAction = new QAction("Quit StarBridge", this);
+
+    connect(showAction, &QAction::triggered, this, &LauncherWindow::onShowWindow);
+    connect(quitAction, &QAction::triggered, this, &LauncherWindow::onQuit);
+
+    trayMenu->addAction(showAction);
+    trayMenu->addSeparator();
+    trayMenu->addAction(quitAction);
+
+    trayIcon->setContextMenu(trayMenu);
+    trayIcon->show();
+
+    // Optional: Click tray icon = show window
+    connect(trayIcon, &QSystemTrayIcon::activated, this, [this](QSystemTrayIcon::ActivationReason reason) {
+        if (reason == QSystemTrayIcon::Trigger || reason == QSystemTrayIcon::DoubleClick) {
+            onShowWindow();
+        }
+    });
+
+    // ---
     runner->startStarBridge();
 }
 
 void LauncherWindow::closeEvent(QCloseEvent *event)
 {
-    runner->stop();
-    event->accept();
+    if (trayIcon->isVisible()) {
+        hide();  // Hide window, stay in tray
+        event->ignore();
+    }
+
+    //runner->stop();
+    //event->accept();
 }
 
 // LauncherWindow.cpp
@@ -212,4 +252,21 @@ void LauncherWindow::logMessage(const QString &rawText, bool isError)
         cursor.removeSelectedText();
         cursor.deleteChar(); // remove extra newline
     }
+}
+
+
+
+// Show window from tray
+void LauncherWindow::onShowWindow()
+{
+    show();
+    raise();
+    activateWindow();
+}
+
+// Real quit
+void LauncherWindow::onQuit()
+{
+    runner->stop();  // Kill Python process
+    qApp->quit();
 }

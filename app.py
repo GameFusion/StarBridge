@@ -20,6 +20,7 @@ import mimetypes
 import base64 
 import socket
 import watchdog_live_diff
+import signal
 
 # auto-setup, will create .env and settings.json if not present
 import setup
@@ -3685,13 +3686,42 @@ def internal_logs():
         return jsonify({'logs': ''.join(lines)})
     return jsonify({'logs': 'No logs found'})
 
+@app.route('/health')
+def health():
+    """Simple health check endpoint"""
+    return jsonify({
+        "status": "healthy",
+        "service": "StarGit",
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "version": "1.0.0"  # optional: replace with your actual version
+    }), 200
+
+
+@app.route('/kill')
+def kill_server():
+    """Gracefully shut down the Flask server"""
+    if request.remote_addr not in ["127.0.0.1", "::1"]:
+        return jsonify({"error": "Access denied"}), 403
+
+    try:
+        requests.get(f"http://127.0.0.1:{ADMIN_PORT}/shutdown", timeout=2)
+    except Exception as e:
+        logger.warning(f"Shutdown request failed: {e}")
+
+    def shutdown():
+        time.sleep(1)
+        os.kill(os.getpid(), signal.SIGTERM)
+
+    threading.Thread(target=shutdown, daemon=True).start()
+    return jsonify({"status": "shutting_down"}), 200
+
 # Main entry point for running the web-server for monitoring and configuration frontend
 ENABLE_FRONTEND = os.getenv('ENABLE_FRONTEND', 'true').lower() == 'true'
 if ENABLE_FRONTEND:
     def start_frontend():
         subprocess.Popen(['python', 'frontend.py'])
     threading.Thread(target=start_frontend, daemon=True).start()
-    logger.info("Frontend enabled and started on http://localhost:5002")
+    logger.info(f"Frontend enabled and started on http://localhost:{ADMIN_PORT}")
 
 # At the very end (after app is created)
 def initialize_live_sync():

@@ -259,5 +259,11 @@ def license_page():
     """
     return render_template_string(html)
 
+@app.route('/shutdown')
+def shutdown_server():
+    func = request.environ.get('werkzeug.server.shutdown')
+    if func: func()
+    return 'Frontend shutting down...'
+
 if __name__ == '__main__':
     app.run(host='127.0.0.1', port=ADMIN_PORT)

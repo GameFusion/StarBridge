@@ -2,5 +2,7 @@
     <qresource prefix="/">
         <file>resources/StarBridge.icns</file>
         <file>resources/splash.png</file>
+        <file>resources/StarBridge.png</file>
+        <file>resources/helloServer.svg</file>
     </qresource>
 </RCC>

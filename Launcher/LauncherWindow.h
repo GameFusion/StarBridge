@@ -2,6 +2,9 @@
 #include <QMainWindow>
 #include <QTextEdit>
 #include <QPushButton>
+#include <QSystemTrayIcon>
+#include <QMenu>
+#include <QAction>
 
 #include "ProcessRunner.h"
 
@@ -11,13 +14,17 @@ class LauncherWindow : public QMainWindow
 public:
     explicit LauncherWindow(QWidget *parent = nullptr);
 
-    void closeEvent(QCloseEvent *event);
+protected:
+    void closeEvent(QCloseEvent *event) override;
 
 private slots:
     void onPlayClicked();
     void onPauseClicked();
     void onStopClicked();
     void onProcessStateChanged(QProcess::ProcessState state);
+
+    void onShowWindow();
+    void onQuit();
 
 private:
 
@@ -33,5 +40,11 @@ private:
     int maxLogLines = 20000;     // Max history
     int trimLogLines = 15000;     // Max history
     bool autoFollow = false;       // Auto-scroll when new logs arrive
+
+    // System Tray variables
+    QSystemTrayIcon *trayIcon;
+    QMenu *trayMenu;
+    QAction *showAction;
+    QAction *quitAction;
 };
 
