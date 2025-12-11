@@ -15,6 +15,9 @@ public:
     QProcess &getProcess(){
         return process;
     }
+    const QString getPort(){
+        return port;
+    }
 signals:
     void logMessage(const QString &msg, bool isError = false);
 
@@ -29,4 +32,6 @@ private:
     void startProcess();
 
     QProcess process;
+
+    QString port = "5001";
 };

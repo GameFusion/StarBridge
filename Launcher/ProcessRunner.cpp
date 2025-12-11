@@ -20,7 +20,6 @@ void ProcessRunner::startStarBridge()
     QString basePath = QDir::currentPath();
 
     // === Read port from .env ===
-    QString port = "5001";
     QFile envFile(basePath + "/.env");
     if (envFile.open(QIODevice::ReadOnly)) {
         QTextStream in(&envFile);
@@ -59,7 +58,7 @@ void ProcessRunner::startStarBridge()
         }
     });
 
-    connect(reply, &QNetworkReply::finished, this, [this, reply, killUrl, port, manager]() {
+    connect(reply, &QNetworkReply::finished, this, [this, reply, killUrl, manager]() {
         if (reply->error() == QNetworkReply::NoError) {
             emit logMessage("StarBridge is running — terminating old instance...", false);
 
@@ -73,7 +72,7 @@ void ProcessRunner::startStarBridge()
 
             QTimer::singleShot(3000, killReply, [killReply]() { killReply->abort(); });
 
-            connect(killReply, &QNetworkReply::finished, this, [this, killReply, port, manager]() {
+            connect(killReply, &QNetworkReply::finished, this, [this, killReply, manager]() {
                 if (killReply->error() == QNetworkReply::NoError) {
                     emit logMessage("Old instance terminated — waiting for port to free...", false);
                     waitAndStart(port, manager);  // ← ELITE WAIT LOOP

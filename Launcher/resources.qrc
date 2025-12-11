@@ -4,5 +4,6 @@
         <file>resources/splash.png</file>
         <file>resources/StarBridge.png</file>
         <file>resources/helloServer.svg</file>
+	<file>resources/fa-solid-900.ttf</file>
     </qresource>
 </RCC>

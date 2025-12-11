@@ -43,7 +43,8 @@ logging.getLogger("requests").setLevel(logging.WARNING)
 
 logger = logging.getLogger('StarBridge')
 
-
+# Global pause state
+_pause_event = threading.Event()  # Clear = running, Set = paused
 
 # Load environment variables from .env file
 load_dotenv()
@@ -3643,6 +3644,8 @@ def poll_for_tasks(results=None):
 def poll_thread():
     results = []  # Start with empty
     while True:
+        #_pause_event.wait()
+
         tasks = poll_for_tasks(results)
         if tasks:
             results = process_tasks(tasks)
@@ -3689,11 +3692,20 @@ def internal_logs():
 @app.route('/health')
 def health():
     """Simple health check endpoint"""
+
+    frontend_port = os.getenv("ADMIN_PORT", "5002")
+    frontend_url = f"http://127.0.0.1:{frontend_port}"
+
     return jsonify({
         "status": "healthy",
         "service": "StarGit",
         "timestamp": datetime.utcnow().isoformat() + "Z",
-        "version": "1.0.0"  # optional: replace with your actual version
+        "version": "1.0.0",  # todo: replace with your actual version
+        "ports": {
+            "backend": int(request.host.split(':')[1]) if ':' in request.host else 5001,
+            "frontend": int(frontend_port),
+            "frontend_url": frontend_url
+        }
     }), 200
 
 
@@ -3714,6 +3726,29 @@ def kill_server():
 
     threading.Thread(target=shutdown, daemon=True).start()
     return jsonify({"status": "shutting_down"}), 200
+
+@app.route('/pause', methods=['POST'])
+def pause_server():
+    if request.remote_addr not in ["127.0.0.1", "::1"]:
+        return jsonify({"error": "Forbidden"}), 403
+    _pause_event.set()
+    logger.info("StarBridge PAUSED via API")
+    return jsonify({"status": "paused"}), 200
+
+@app.route('/resume', methods=['POST'])
+def resume_server():
+    if request.remote_addr not in ["127.0.0.1", "::1"]:
+        return jsonify({"error": "Forbidden"}), 403
+    _pause_event.clear()
+    logger.info("StarBridge RESUMED via API")
+    return jsonify({"status": "running"}), 200
+
+@app.route('/status')
+def server_status():
+    return jsonify({
+        "status": "paused" if _pause_event.is_set() else "running",
+        "paused": _pause_event.is_set()
+    }), 200
 
 # Main entry point for running the web-server for monitoring and configuration frontend
 ENABLE_FRONTEND = os.getenv('ENABLE_FRONTEND', 'true').lower() == 'true'
