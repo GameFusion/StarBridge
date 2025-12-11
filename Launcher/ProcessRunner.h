@@ -10,6 +10,9 @@ public:
     void startStarBridge();
     void stop();
 
+    QProcess &getProcess(){
+        return process;
+    }
 signals:
     void logMessage(const QString &msg, bool isError = false);
 

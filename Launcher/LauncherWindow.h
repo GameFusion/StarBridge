@@ -1,6 +1,8 @@
 #pragma once
 #include <QMainWindow>
 #include <QTextEdit>
+#include <QPushButton>
+
 #include "ProcessRunner.h"
 
 class LauncherWindow : public QMainWindow
@@ -11,8 +13,18 @@ public:
 
     void closeEvent(QCloseEvent *event);
 
+private slots:
+    void onPlayClicked();
+    void onPauseClicked();
+    void onStopClicked();
+    void onProcessStateChanged(QProcess::ProcessState state);
+
 private:
     QTextEdit *logView;
+    QPushButton *playBtn;
+    QPushButton *pauseBtn;
+    QPushButton *stopBtn;
+
     ProcessRunner *runner;
     //QProcess *pythonProcess;
 };
