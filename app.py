@@ -59,6 +59,8 @@ KEY_PATH = settings.get("ssl.key_path", "certs/key.pem")
 
 STARGIT_API_KEY = os.getenv('STARGIT_API_KEY', '')
 STARGIT_API_URL = os.getenv('STARGIT_API_URL', 'https://stargit.com')
+STARBRIDGE_PORT = os.getenv('STARBRIDGE_PORT', 5001)
+ADMIN_PORT = os.getenv('ADMIN_PORT', 5002)
 SERVER_UUID = os.getenv("STARBRIDGE_SERVER_UUID")
 AUTH_ENDPOINT = f"{STARGIT_API_URL}/api/auth/token"
 REGISTER_ENDPOINT = f"{STARGIT_API_URL}/api/servers/register"
@@ -169,7 +171,6 @@ def run_git_command(path, command):
     except subprocess.CalledProcessError as e:
         logger.error("Git command error: %s", e.stderr.strip())
         return f"Error: {e.stderr.strip()}"
-
 
 @app.route('/api/refs', methods=['POST'])
 def get_refs():
@@ -757,8 +758,9 @@ def get_git_status_data(repo_path, git_executable="git"):
     logger.debug(f"Fetching git status for {repo_path}")
     try:
         # Use porcelain=v2 with -z for machine-readable, unambiguous output
+        # Use "--untracked-files=all" to list all untracked files
         result = subprocess.run(
-            [git_executable, "-C", repo_path, "status", "--porcelain=v2", "-z", "--branch"],
+            [git_executable, "-C", repo_path, "status", "--untracked-files=all", "--porcelain=v2", "-z", "--branch"],
             capture_output=True,
             text=True,
             check=True
@@ -3478,15 +3480,8 @@ def process_tasks(tasks):
 
         elif action == "run_ci":
             start_time = time.time()
-            repo_name = params.get("repo_name")
             event_name = params.get("event", "manual")
             runner_id = params.get("runner_id")  # optional: specific runner
-
-            repo_path = find_repo_path_by_name(repo_name)
-            if not repo_path:
-                task_result.update({"error": "Repo not found"})
-                results.append(task_result)
-                continue
 
             try:
                 logger.info(f"Running CI/CD for {repo_name} → event: {event_name}")
@@ -3717,8 +3712,8 @@ if __name__ == '__main__':
     logger.info("Starting StarBridge server")
     if SSL_MODE and SSL_MODE == 'adhoc':
         logger.warning("Starting server in adhoc SSL mode")
-        app.run(ssl_context='adhoc', host='0.0.0.0', port=5001)
+        app.run(ssl_context='adhoc', host='0.0.0.0', port=STARBRIDGE_PORT)
     else:
-        app.run(ssl_context=(CERT_PATH, KEY_PATH), host='0.0.0.0', port=5001)
+        app.run(ssl_context=(CERT_PATH, KEY_PATH), host='0.0.0.0', port=STARBRIDGE_PORT)
 
 logger.info("StarBridge server online")

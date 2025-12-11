@@ -14,6 +14,8 @@ SETTINGS_PATH = 'settings.json'
 ENV_PATH = '.env'
 load_dotenv()
 
+ADMIN_PORT = os.getenv('ADMIN_PORT', 5002)
+
 # Ultra-dark theme CSS (inspired by stargit.com: black bg, neon green accents)
 DARK_THEME_CSS = """
 body { background-color: #000; color: #fff; font-family: monospace; margin: 0; padding: 20px; }
@@ -258,4 +260,4 @@ def license_page():
     return render_template_string(html)
 
 if __name__ == '__main__':
-    app.run(host='127.0.0.1', port=5002)
+    app.run(host='127.0.0.1', port=ADMIN_PORT)
