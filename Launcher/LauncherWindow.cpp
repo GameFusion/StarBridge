@@ -38,7 +38,7 @@ QTextEdit {
         border-radius: 12px;
         padding: 16px;
         font-family: 'Menlo', 'Consolas', 'Courier New', monospace;
-        font-size: 13px;
+        font-size: 11px;
         line-height: 1.5;
     }
 
