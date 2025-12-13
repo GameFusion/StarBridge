@@ -20,6 +20,7 @@ import mimetypes
 import base64 
 import socket
 import watchdog_live_diff
+import signal
 
 # auto-setup, will create .env and settings.json if not present
 import setup
@@ -42,7 +43,8 @@ logging.getLogger("requests").setLevel(logging.WARNING)
 
 logger = logging.getLogger('StarBridge')
 
-
+# Global pause state
+_pause_event = threading.Event()  # Clear = running, Set = paused
 
 # Load environment variables from .env file
 load_dotenv()
@@ -59,6 +61,8 @@ KEY_PATH = settings.get("ssl.key_path", "certs/key.pem")
 
 STARGIT_API_KEY = os.getenv('STARGIT_API_KEY', '')
 STARGIT_API_URL = os.getenv('STARGIT_API_URL', 'https://stargit.com')
+STARBRIDGE_PORT = os.getenv('STARBRIDGE_PORT', 5001)
+ADMIN_PORT = os.getenv('ADMIN_PORT', 5002)
 SERVER_UUID = os.getenv("STARBRIDGE_SERVER_UUID")
 AUTH_ENDPOINT = f"{STARGIT_API_URL}/api/auth/token"
 REGISTER_ENDPOINT = f"{STARGIT_API_URL}/api/servers/register"
@@ -169,7 +173,6 @@ def run_git_command(path, command):
     except subprocess.CalledProcessError as e:
         logger.error("Git command error: %s", e.stderr.strip())
         return f"Error: {e.stderr.strip()}"
-
 
 @app.route('/api/refs', methods=['POST'])
 def get_refs():
@@ -749,7 +752,6 @@ def commit():
             "details": e.stderr.decode() if e.stderr else str(e)
         }), 500
 
-
 def get_git_status_data(repo_path, git_executable="git"):
     """
     Full Git status with staged/unstaged/conflicts support using porcelain=v2.
@@ -757,6 +759,7 @@ def get_git_status_data(repo_path, git_executable="git"):
     logger.debug(f"Fetching git status for {repo_path}")
     try:
         # Use porcelain=v2 with -z for machine-readable, unambiguous output
+        # Use "--untracked-files=all" to list all untracked files
         result = subprocess.run(
             [git_executable, "-C", repo_path, "status", "--porcelain=v2", "-z", "--branch"],
             capture_output=True,
@@ -3536,15 +3539,8 @@ def process_tasks(tasks):
 
         elif action == "run_ci":
             start_time = time.time()
-            repo_name = params.get("repo_name")
             event_name = params.get("event", "manual")
             runner_id = params.get("runner_id")  # optional: specific runner
-
-            repo_path = find_repo_path_by_name(repo_name)
-            if not repo_path:
-                task_result.update({"error": "Repo not found"})
-                results.append(task_result)
-                continue
 
             try:
                 logger.info(f"Running CI/CD for {repo_name} → event: {event_name}")
@@ -3706,6 +3702,8 @@ def poll_for_tasks(results=None):
 def poll_thread():
     results = []  # Start with empty
     while True:
+        #_pause_event.wait()
+
         tasks = poll_for_tasks(results)
         if tasks:
             results = process_tasks(tasks)
@@ -3749,13 +3747,74 @@ def internal_logs():
         return jsonify({'logs': ''.join(lines)})
     return jsonify({'logs': 'No logs found'})
 
+@app.route('/health')
+def health():
+    """Simple health check endpoint"""
+
+    frontend_port = os.getenv("ADMIN_PORT", "5002")
+    frontend_url = f"http://127.0.0.1:{frontend_port}"
+
+    return jsonify({
+        "status": "healthy",
+        "service": "StarGit",
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "version": "1.0.0",  # todo: replace with your actual version
+        "ports": {
+            "backend": int(request.host.split(':')[1]) if ':' in request.host else 5001,
+            "frontend": int(frontend_port),
+            "frontend_url": frontend_url
+        }
+    }), 200
+
+
+@app.route('/kill')
+def kill_server():
+    """Gracefully shut down the Flask server"""
+    if request.remote_addr not in ["127.0.0.1", "::1"]:
+        return jsonify({"error": "Access denied"}), 403
+
+    try:
+        requests.get(f"http://127.0.0.1:{ADMIN_PORT}/shutdown", timeout=2)
+    except Exception as e:
+        logger.warning(f"Shutdown request failed: {e}")
+
+    def shutdown():
+        time.sleep(1)
+        os.kill(os.getpid(), signal.SIGTERM)
+
+    threading.Thread(target=shutdown, daemon=True).start()
+    return jsonify({"status": "shutting_down"}), 200
+
+@app.route('/pause', methods=['POST'])
+def pause_server():
+    if request.remote_addr not in ["127.0.0.1", "::1"]:
+        return jsonify({"error": "Forbidden"}), 403
+    _pause_event.set()
+    logger.info("StarBridge PAUSED via API")
+    return jsonify({"status": "paused"}), 200
+
+@app.route('/resume', methods=['POST'])
+def resume_server():
+    if request.remote_addr not in ["127.0.0.1", "::1"]:
+        return jsonify({"error": "Forbidden"}), 403
+    _pause_event.clear()
+    logger.info("StarBridge RESUMED via API")
+    return jsonify({"status": "running"}), 200
+
+@app.route('/status')
+def server_status():
+    return jsonify({
+        "status": "paused" if _pause_event.is_set() else "running",
+        "paused": _pause_event.is_set()
+    }), 200
+
 # Main entry point for running the web-server for monitoring and configuration frontend
 ENABLE_FRONTEND = os.getenv('ENABLE_FRONTEND', 'true').lower() == 'true'
 if ENABLE_FRONTEND:
     def start_frontend():
         subprocess.Popen(['python', 'frontend.py'])
     threading.Thread(target=start_frontend, daemon=True).start()
-    logger.info("Frontend enabled and started on http://localhost:5002")
+    logger.info(f"Frontend enabled and started on http://localhost:{ADMIN_PORT}")
 
 # At the very end (after app is created)
 def initialize_live_sync():
@@ -3775,8 +3834,8 @@ if __name__ == '__main__':
     logger.info("Starting StarBridge server")
     if SSL_MODE and SSL_MODE == 'adhoc':
         logger.warning("Starting server in adhoc SSL mode")
-        app.run(ssl_context='adhoc', host='0.0.0.0', port=5001)
+        app.run(ssl_context='adhoc', host='0.0.0.0', port=STARBRIDGE_PORT)
     else:
-        app.run(ssl_context=(CERT_PATH, KEY_PATH), host='0.0.0.0', port=5001)
+        app.run(ssl_context=(CERT_PATH, KEY_PATH), host='0.0.0.0', port=STARBRIDGE_PORT)
 
 logger.info("StarBridge server online")

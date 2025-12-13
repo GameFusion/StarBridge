@@ -1,4 +1,4 @@
-from flask import Flask, render_template_string, request, redirect, url_for, jsonify
+from flask import Flask, render_template_string, request, redirect, url_for, jsonify, render_template
 import os
 import json
 from dotenv import load_dotenv, dotenv_values
@@ -14,18 +14,7 @@ SETTINGS_PATH = 'settings.json'
 ENV_PATH = '.env'
 load_dotenv()
 
-# Ultra-dark theme CSS (inspired by stargit.com: black bg, neon green accents)
-DARK_THEME_CSS = """
-body { background-color: #000; color: #fff; font-family: monospace; margin: 0; padding: 20px; }
-a { color: #0f0; text-decoration: none; } a:hover { text-decoration: underline; }
-h1, h2 { color: #0f0; }
-input, select, textarea, button { background: #111; color: #fff; border: 1px solid #0f0; padding: 8px; }
-button { cursor: pointer; } button:hover { background: #0f0; color: #000; }
-ul { list-style: none; padding: 0; }
-li { margin: 10px 0; }
-form { max-width: 800px; }
-pre { background: #111; padding: 10px; overflow: auto; }
-"""
+ADMIN_PORT = os.getenv('ADMIN_PORT', 5002)
 
 # Navigation menu
 NAV = """
@@ -56,7 +45,7 @@ def load_env():
     return dotenv_values(ENV_PATH)
 
 # Helper to save .env (only allowed keys)
-ALLOWED_ENV_KEYS = ['GIT_VERBOSE', 'PUSH_MODE', 'SSL_MODE', 'ENABLE_FRONTEND']  # No secrets
+ALLOWED_ENV_KEYS = ['GIT_VERBOSE', 'PUSH_MODE', 'POLL_MODE', 'SSL_MODE', 'ENABLE_FRONTEND']  # No secrets
 def save_env(updates):
     env = load_env()
     for key in ALLOWED_ENV_KEYS:
@@ -99,36 +88,13 @@ def config():
     # Mask secrets
     masked_env = {k: (v[:4] + '...' if k in ['STARBRIDGE_API_KEY', 'STARBRIDGE_SERVER_UUID'] else v) for k, v in env.items()}
     
-    html = f"""
-    <html><head><style>{DARK_THEME_CSS}</style></head><body>
-    {NAV}
-    <h1>StarBridge Configuration</h1>
-    <form method="POST">
-        <h2>Settings (settings.json)</h2>
-        <label>Git Executable: <input name="git_executable" value="{settings.get('git_executable', '')}"></label><br>
-        <label>SSL Cert Path: <input name="cert_path" value="{settings['ssl'].get('cert_path', '')}"></label><br>
-        <label>SSL Key Path: <input name="key_path" value="{settings['ssl'].get('key_path', '')}"></label><br>
-        
-        <h2>Environment (.env - Non-Secrets)</h2>
-        <label>GIT_VERBOSE: <select name="git_verbose"><option value="true" {'selected' if env.get('GIT_VERBOSE', 'false') == 'true' else ''}>true</option><option value="false" {'selected' if env.get('GIT_VERBOSE', 'false') == 'false' else ''}>false</option></select></label><br>
-        <label>PUSH_MODE: <select name="push_mode"><option value="true" {'selected' if env.get('PUSH_MODE', 'false') == 'true' else ''}>true</option><option value="false" {'selected' if env.get('PUSH_MODE', 'false') == 'false' else ''}>false</option></select></label><br>
-        <label>SSL_MODE: <input name="ssl_mode" value="{env.get('SSL_MODE', 'none')}"></label><br>
-        <label>ENABLE_FRONTEND: <select name="enable_frontend"><option value="true" {'selected' if env.get('ENABLE_FRONTEND', 'true') == 'true' else ''}>true</option><option value="false" {'selected' if env.get('ENABLE_FRONTEND', 'true') == 'false' else ''}>false</option></select></label><br>
-        
-        <h2>Secrets (Masked - Regenerate if Needed)</h2>
-        <p>API Key: {masked_env.get('STARBRIDGE_API_KEY', 'N/A')} <button type="submit" name="regenerate_api_key" value="1">Regenerate</button></p>
-        <p>Server UUID: {masked_env.get('STARBRIDGE_SERVER_UUID', 'N/A')} <button type="submit" name="regenerate_uuid" value="1">Regenerate</button></p>
-        
-        <button type="submit">Save Changes</button>
-    </form>
-    </body></html>
-    """
-    return render_template_string(html)
+    return render_template('config.html', settings=settings, env=env, masked_env=masked_env, nav=NAV)
 
 @app.route('/repos', methods=['GET', 'POST'])
 def manage_repos():
     settings = load_settings()
     repos = settings.get('repositories', [])
+
     if request.method == 'POST':
         action = request.form.get('action')
         if action == 'add':
@@ -142,26 +108,15 @@ def manage_repos():
         settings['repositories'] = repos
         save_settings(settings)
         return redirect(url_for('manage_repos'))
-    
-    html = f"""
-    <html><head><style>{DARK_THEME_CSS}</style></head><body>
-    {NAV}
-    <h1>Manage Repositories</h1>
-    <ul>
-    {"".join(f'<li>{repo} <form method="POST" style="display:inline;"><input type="hidden" name="action" value="remove"><input type="hidden" name="repo" value="{repo}"><button>Remove</button></form></li>' for repo in repos)}
-    </ul>
-    <form method="POST">
-        <input type="hidden" name="action" value="add">
-        <label>Add Repo Path: <input name="new_repo"></label>
-        <button type="submit">Add</button>
-    </form>
-    </body></html>
-    """
-    return render_template_string(html)
+
+    return render_template(
+        'repos.html',
+        repos=repos,
+        nav=NAV
+    )
 
 @app.route('/endpoints')
 def endpoints():
-    # Static list based on your app.py
     endpoint_list = [
         {'path': '/api/refs', 'method': 'POST', 'desc': 'Get local and remote refs for a repo.'},
         {'path': '/api/add', 'method': 'POST', 'desc': 'Add a file to the index.'},
@@ -169,39 +124,25 @@ def endpoints():
         {'path': '/api/remotes', 'method': 'POST', 'desc': 'Get remotes.'},
         {'path': '/api/revwalk', 'method': 'POST', 'desc': 'Get commit history.'},
         {'path': '/api/diff', 'method': 'POST', 'desc': 'Get diffs.'},
-        # Add more from your app.py
     ]
-    html = f"""
-    <html><head><style>{DARK_THEME_CSS}</style></head><body>
-    {NAV}
-    <h1>API Endpoints (Pull Mode)</h1>
-    <ul>
-    {"".join(f'<li><strong>{e["path"]}</strong> ({e["method"]}): {e["desc"]}</li>' for e in endpoint_list)}
-    </ul>
-    </body></html>
-    """
-    return render_template_string(html)
+    return render_template(
+        'api_endpoints.html',
+        endpoint_list=endpoint_list,
+        nav=NAV
+    )
 
 @app.route('/poll')
 def poll_features():
-    # Based on your poll_thread and process_tasks
     features = [
         'get_file: Fetch file content at a ref (text or base64 binary).',
         'get_file_history: Get commit history for a file.',
-        # Add more
+        # Add more features as needed
     ]
-    html = f"""
-    <html><head><style>{DARK_THEME_CSS}</style></head><body>
-    {NAV}
-    <h1>Secure Poll Mode Features</h1>
-    <p>StarBridge polls Stargit for tasks every 1s and processes them securely.</p>
-    <ul>
-    {"".join(f'<li>{f}</li>' for f in features)}
-    </ul>
-    </body></html>
-    """
-    return render_template_string(html)
-
+    return render_template(
+        'poll_features.html',
+        features=features,
+        nav=NAV
+    )
 @app.route('/stats', methods=['GET', 'POST'])
 def stats():
     if request.method == 'POST' and 'restart' in request.form:
@@ -211,34 +152,32 @@ def stats():
         psutil.Process(pid).terminate()  # Kill current
         return 'Restarting...'
 
-    # Fetch from internal API
+    # Fetch metrics
     try:
-        stats_resp = requests.get('http://localhost:5001/internal/stats')
-        metrics = stats_resp.json() if stats_resp.status_code == 200 else {}
-        logs_resp = requests.get('http://localhost:5001/internal/logs')
-        logs = logs_resp.json().get('logs', '') if logs_resp.status_code == 200 else 'No logs'
+        stats_resp = requests.get('https://127.0.0.1:5005/internal/stats', verify=False, timeout=5)
+        metrics = stats_resp.json() if stats_resp.ok else {}
     except:
         metrics = {}
-        logs = 'API server not responding'
 
-    html = f"""
-    <html><head><style>{DARK_THEME_CSS}</style></head><body>
-    {NAV}
-    <h1>Stats & Monitoring</h1>
-    <p>Uptime: {metrics.get('uptime_seconds', 0) // 3600}h { (metrics.get('uptime_seconds', 0) % 3600) // 60}m</p>
-    <p>CPU: {metrics.get('cpu_percent', 'N/A')}% | Memory: {metrics.get('memory_percent', 'N/A')}%</p>
-    <form method="POST"><button name="restart" value="1">Restart Server</button></form>
-    <h2>Logs (Last 100 lines)</h2>
-    <pre>{logs}</pre>
-    <h2>Best Practices</h2>
-    <ul>
-        <li>Backup .env regularly.</li>
-        <li>Monitor logs for errors.</li>
-        <li>Use SSL for production.</li>
-    </ul>
-    </body></html>
-    """
-    return render_template_string(html)
+    # Fetch logs
+    try:
+        logs_resp = requests.get('https://127.0.0.1:5005/internal/logs', verify=False, timeout=5)
+        logs = logs_resp.json().get('logs', 'No logs') if logs_resp.ok else 'Failed to fetch logs'
+    except:
+        logs = 'Log endpoint unreachable'
+
+    uptime_h = int(metrics.get('uptime_seconds', 0) // 3600)
+    uptime_m = int((metrics.get('uptime_seconds', 0) % 3600) // 60)
+
+    return render_template(
+        'stats.html',
+        uptime_h=uptime_h,
+        uptime_m=uptime_m,
+        cpu_percent=metrics.get('cpu_percent', 'N/A'),
+        memory_percent=metrics.get('memory_percent', 'N/A'),
+        logs=logs,
+        nav=NAV
+    )
 
 @app.route('/license')
 def license_page():
@@ -248,14 +187,11 @@ def license_page():
             content = f.read()
     else:
         content = 'No LICENSE file found. Add one to the root directory.'
-    html = f"""
-    <html><head><style>{DARK_THEME_CSS}</style></head><body>
-    {NAV}
-    <h1>License</h1>
-    <pre>{content}</pre>
-    </body></html>
-    """
-    return render_template_string(html)
+    return render_template(
+        'license.html',
+        content=content,
+        nav=NAV
+    )
 
 if __name__ == '__main__':
-    app.run(host='127.0.0.1', port=5002)
+    app.run(host='127.0.0.1', port=ADMIN_PORT)
