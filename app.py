@@ -878,9 +878,9 @@ def get_git_status_data(repo_path, git_executable="git"):
         elif unstaged_count > 0:
             action_summary = "Pending changes"
             action_message = f"{unstaged_count} unstaged change(s)."
-        elif summary["untracked"]:
-            action_summary = "Untracked files"
-            action_message = f"{len(summary['untracked'])} untracked file(s)."
+        #elif summary["untracked"]:
+        #    action_summary = "Untracked files"
+        #    action_message = f"{len(summary['untracked'])} untracked file(s)."
         else:
             action_summary = "Up to date"
             action_message = "Working tree clean."
