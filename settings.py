@@ -30,12 +30,14 @@ DEFAULT_SETTINGS = {
 # === LOAD SETTINGS ===
 _settings: Dict[str, Any] = {}
 
-def load_settings() -> Dict[str, Any]:
+def load_settings(reload: bool = False) -> Dict[str, Any]:
     """Load settings.json with defaults and validation"""
     global _settings
 
-    if _settings:
+    if _settings and not reload:
         return _settings  # Already loaded
+
+    user_settings = {}
 
     if SETTINGS_FILE.exists():
         try:
@@ -69,6 +71,37 @@ def get_nested(section: str, key: str, default: Any = None) -> Any:
     load_settings()
     return _settings.get(section, {}).get(key, default)
 
+def add_repository(repo_path: str, reload_settings: bool = True) -> None:
+    """Add a repository path to settings.json if not already present."""
+    load_settings(reload=reload_settings)
+    repo_path = str(repo_path)
+
+    if repo_path not in _settings.get("repositories", []):
+        _settings["repositories"].append(repo_path)
+        _save_settings()
+        print(f"Repository added to settings: {repo_path}")
+
+
+def remove_repository(repo_path: str, reload_settings: bool = True) -> None:
+    """Remove a repository path from settings.json."""
+    load_settings(reload=reload_settings)
+    repo_path = str(repo_path)
+
+    if repo_path in _settings.get("repositories", []):
+        _settings["repositories"].remove(repo_path)
+        _save_settings()
+        print(f"Repository removed from settings: {repo_path}")
+
+
+def _save_settings() -> None:
+    """Save current _settings dict to settings.json"""
+    try:
+        with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
+            json.dump(_settings, f, indent=2)
+        print(f"Settings saved to {SETTINGS_FILE}")
+    except Exception as e:
+        print(f"Failed to save settings.json: {e}")
+    
 # Auto-load on import
 load_settings()
 

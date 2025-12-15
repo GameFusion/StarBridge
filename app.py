@@ -3604,6 +3604,7 @@ def process_tasks(tasks):
             print("create_repo action event", flush=True)
             params = params or {}
             repo_name = params.get("repo_name")
+            repo_uuid = params.get("repo_uuid")
             owner = params.get("owner", "user")
             description = params.get("description", "")
             default_branch = params.get("default_branch", "main")
@@ -3614,6 +3615,7 @@ def process_tasks(tasks):
             init_gitignore = params.get("init_gitignore", False)
             init_license = params.get("init_license", False)
             gitignore_template = params.get("gitignore_template", "")
+
 
             try:
                 if not repo_name:
@@ -3650,7 +3652,7 @@ def process_tasks(tasks):
                 if init_readme or init_gitignore or init_license:
                     if bare:
                         # Use a temporary workdir inside the repo storage
-                        workdir = os.path.join(STARGIT_WORK_ROOT, f"init-{repo_name}-{uuid.uuid4()}")
+                        workdir = os.path.join(STARGIT_WORK_ROOT, f"init-{repo_name}-{repo_uuid}")
                         os.makedirs(workdir, exist_ok=False)
                     else:
                         # Non-bare repo: use the repo_path itself
@@ -3686,8 +3688,10 @@ def process_tasks(tasks):
                         ], check=True)
                         shutil.rmtree(workdir)  # cleanup temporary workdir
 
+                added = settings.add_repository(repo_path)
+
                 task_result["result"] = {
-                    "repo_uuid": str(uuid.uuid4()),
+                    "repo_uuid": repo_uuid,
                     "repo_path": repo_path,
                     "is_bare": bare
                 }
@@ -3696,6 +3700,32 @@ def process_tasks(tasks):
                 logger.exception("create_repo failed")
                 task_result.update({"error": str(e)})
 
+        elif action == "delete_repo":
+            repo_name = params.get("repo_name")
+            logger.info(f"Delete repository request received for: '{repo_name}'")
+
+            repo_path = find_repo_path_by_name(repo_name)
+            
+            if repo_path:
+                logger.debug(f"Resolved repository path: {repo_path}")
+
+                if os.path.exists(repo_path):
+                    try:
+                        shutil.rmtree(repo_path)
+                        settings.remove_repository(repo_path)
+                        task_result["result"] = {"status": "deleted"}
+                        logger.info(f"Successfully deleted repository directory: {repo_path}")
+                    except Exception as e:
+                        task_result.update({"error": str(e)})
+                        logger.error(f"Error deleting repository '{repo_name}' at {repo_path}: {e}", exc_info=True)
+                else:
+                    settings.remove_repository(repo_path)  # clean up settings even if directory missing
+                    task_result["result"] = {"status": "not_found"}
+                    logger.warning(f"Repository directory does not exist: {repo_path}")
+            else:
+                task_result["result"] = {"status": "not_found"}
+                logger.warning(f"Repository '{repo_name}' could not be resolved to a path")
+              
         else:
             logger.warning(f"Unknown action: {action}")
             results.append({"task_id": task['id'], "result": None, "error": f"Unknown action: {action}"})
