@@ -21,6 +21,7 @@ import base64
 import socket
 import watchdog_live_diff
 import signal
+import shutil
 
 # auto-setup, will create .env and settings.json if not present
 import setup
@@ -58,6 +59,7 @@ GIT_EXECUTABLE = settings.get("git_executable", "git")
 REPOSITORIES = settings.get("repositories", [])
 CERT_PATH = settings.get("ssl.cert_path", "certs/cert.pem")      # dot notation
 KEY_PATH = settings.get("ssl.key_path", "certs/key.pem")
+REPO_BASE = settings.get('repo_base') # REPO_BASE needs to explicitly be defined in settings to allow starbridge to create new repositories in poll mode
 
 STARGIT_API_KEY = os.getenv('STARGIT_API_KEY', '')
 STARGIT_API_URL = os.getenv('STARGIT_API_URL', 'https://stargit.com')
@@ -2830,12 +2832,16 @@ def process_tasks(tasks):
         action = task.get('action')
         params = task.get('params', {})
         repo_name = params.get('repo_name')
-        repo_path = find_repo_path_by_name(repo_name)
 
-        if not repo_path:
-            logger.warning(f"Repo {repo_name} not found")
-            results.append({"task_id": task['id'], "result": None, "error": f"Repo {repo_name} not found"})
-            continue
+        if action == "create_repo":
+            repo_path = None
+        else:
+            repo_path = find_repo_path_by_name(repo_name)
+
+            if not repo_path:
+                logger.warning(f"Repo {repo_name} not found")
+                results.append({"task_id": task['id'], "result": None, "error": f"Repo {repo_name} not found"})
+                continue
         
         task_result = {"task_id": task['id'], 'repo_name': repo_name}
         needs_status_refresh = action in STATUS_CHANGING_ACTIONS
@@ -2859,7 +2865,6 @@ def process_tasks(tasks):
                 #results.append({"task_id": task['id'], "result": content_data, "error": None})
                 task_result.update({"result": content_data, "error": None})
         
-        # In StarBridge process_tasks.py
         elif action == "create_file":
             
             file_path = params.get("file_path")      # e.g. ".stargit/ci.yml"
@@ -3594,6 +3599,102 @@ def process_tasks(tasks):
             except Exception as e:
                 task_result.update({"error": str(e)})
                 logger.exception(f"CI/CD crashed for {repo_name}")
+
+        elif action == "create_repo":
+            print("create_repo action event", flush=True)
+            params = params or {}
+            repo_name = params.get("repo_name")
+            owner = params.get("owner", "user")
+            description = params.get("description", "")
+            default_branch = params.get("default_branch", "main")
+            visibility = params.get("visibility", "private")
+            bare = params.get("is_bare", False)
+            immutable = params.get("immutable", True)
+            init_readme = params.get("init_readme", False)
+            init_gitignore = params.get("init_gitignore", False)
+            init_license = params.get("init_license", False)
+            gitignore_template = params.get("gitignore_template", "")
+
+            try:
+                if not repo_name:
+                    raise ValueError("repo_name is required")
+
+                print("REPO_BASE:", REPO_BASE, flush=True)
+
+                STARGIT_WORK_ROOT = os.path.join(REPO_BASE, "_work")
+                os.makedirs(STARGIT_WORK_ROOT, exist_ok=True)
+
+                if bare:
+                    repo_path = os.path.join(REPO_BASE, f"{repo_name}.git")
+                else:
+                    repo_path = os.path.join(REPO_BASE, f"{repo_name}")
+                print("repo_path:", repo_path, flush=True)
+
+                # Create repo directory
+                os.makedirs(repo_path, exist_ok=False)
+
+                # Initialize bare repository
+                # Initialize bare or non-bare repo
+                git_init_args = [GIT_EXECUTABLE, "init"]
+                if bare:
+                    git_init_args.insert(1, "--bare")
+                git_init_args.append(repo_path)
+                subprocess.run(git_init_args, check=True)
+
+                # Set repository description (Git uses 'description', not description.txt)
+                if description:
+                    with open(os.path.join(repo_path, "description"), "w", encoding="utf-8") as f:
+                        f.write(description)
+
+                # Create initial commit if needed
+                if init_readme or init_gitignore or init_license:
+                    if bare:
+                        # Use a temporary workdir inside the repo storage
+                        workdir = os.path.join(STARGIT_WORK_ROOT, f"init-{repo_name}-{uuid.uuid4()}")
+                        os.makedirs(workdir, exist_ok=False)
+                    else:
+                        # Non-bare repo: use the repo_path itself
+                        workdir = repo_path
+                    
+                    # Initialize (non-bare) workdir if bare
+                    if bare:
+                        subprocess.run([GIT_EXECUTABLE, "init", workdir], check=True)
+
+                    subprocess.run([GIT_EXECUTABLE, "-C", workdir, "checkout", "-b", default_branch], check=True)
+
+                    if init_readme:
+                        with open(os.path.join(workdir, "README.md"), "w") as f:
+                            f.write(f"# {repo_name}\n\n{description}")
+                    if init_gitignore and gitignore_template:
+                        with open(os.path.join(workdir, ".gitignore"), "w") as f:
+                            f.write(get_gitignore_template(gitignore_template))
+                    if init_license:
+                        with open(os.path.join(workdir, "LICENSE"), "w") as f:
+                            f.write(get_mit_license())
+
+                    subprocess.run([GIT_EXECUTABLE, "-C", workdir, "add", "."], check=True)
+                    subprocess.run([
+                        GIT_EXECUTABLE, "-C", workdir, "commit",
+                        "-m", "Initial commit",
+                        "--author", "StarGit <noreply@stargit.com>"
+                    ], check=True)
+
+                    if bare:
+                        # Push/fetch into bare repo
+                        subprocess.run([
+                            GIT_EXECUTABLE, "-C", repo_path, "fetch", workdir, f"{default_branch}:{default_branch}"
+                        ], check=True)
+                        shutil.rmtree(workdir)  # cleanup temporary workdir
+
+                task_result["result"] = {
+                    "repo_uuid": str(uuid.uuid4()),
+                    "repo_path": repo_path,
+                    "is_bare": bare
+                }
+
+            except Exception as e:
+                logger.exception("create_repo failed")
+                task_result.update({"error": str(e)})
 
         else:
             logger.warning(f"Unknown action: {action}")
