@@ -1977,36 +1977,55 @@ def get_readme_text(repo_path):
     #logger.debug("No README.md found in %s", repo_path)
     return ""
 
-# Updated collect_repo_details
-def collect_repo_details():
+def full_sync(repo_path: str, repo_name: str = None) -> dict:
     """
-    Collect detailed information about all local repositories, including branches, status, remotes, and commits.
-    Returns a structure similar to the provided example.
+    Perform a complete sync of repository metadata:
+    - status
+    - remote_heads
+    - branches
+    - remotes
+    - description
+    - commits (latest 300)
+    - files + size
+    - README
+
+    Returns dict with all data (for logging or return)
     """
-    servers = {"name": "Origin Server", "repos": []}
-    
-    for repo_path in REPOSITORIES:
+    if repo_name is None:
         repo_name = os.path.basename(repo_path)
-        repo = {"name": repo_name}
-        
-        # Get branch info
-        branch_info = get_current_branch_or_default(repo_path)
-        repo["branch"] = branch_info['branch']
-        
-        # Get status and determine action status
+
+    sync_result = {
+        "repo_name": repo_name,
+        "repo_path": repo_path,
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "errors": []
+    }
+
+    try:
+        # === 1. Git status ===
         status_data, status_error = get_git_status_data(repo_path)
         if status_error:
-            repo["status"] = {"error": status_error["message"]}
+            sync_result["errors"].append(f"status: {status_error['message']}")
+            sync_result["status"] = {"error": status_error["message"]}
         else:
-            repo["status"] = status_data
-        
-        remote_heads = git_utils.get_remote_heads(repo_path)
-        repo["remote_heads"] = remote_heads
+            sync_result["status"] = status_data
 
-        # Get remotes
+        # === 2. Remote heads ===
+        remote_heads = git_utils.get_remote_heads(repo_path)
+        sync_result["remote_heads"] = remote_heads
+
+        # === 3. Branches ===
+        branches, branches_error = get_branches_data(repo_path)
+        if branches_error:
+            sync_result["errors"].append(f"branches: {branches_error}")
+            sync_result["branches"] = {"error": branches_error}
+        else:
+            sync_result["branches"] = branches
+
+        # === 4. Remotes ===
         remotes_info = []
         remotes_output = run_git_command(repo_path, [GIT_EXECUTABLE, "-C", repo_path, "remote", "-v"])
-        seen = set()  # To avoid duplicates if fetch/push are the same
+        seen = set()
         for line in remotes_output.splitlines():
             if line.strip():
                 parts = line.split()
@@ -2016,53 +2035,94 @@ def collect_repo_details():
                     if key not in seen:
                         remotes_info.append({"name": name, "type": typ, "url": url})
                         seen.add(key)
-        repo["remotes"] = remotes_info
-        print("repo['remotes']", repo["remotes"], flush=True)
-        
-        branches, branches_error = get_branches_data(repo_path)
-        if branches_error:
-            print("Failed to get branches:", branches_error)
-            repo["branches"] = branches_error
-        else:
-            print("Branches data:", branches)
-            repo["branches"] = branches
-        
-        # Get commits (using rev_walk logic)
-        command = [GIT_EXECUTABLE, "-C", repo_path, "log", "--date=iso", "--pretty=format:%H|%P|%an|%ae|%ad|%s", repo["branch"]]
+        sync_result["remotes"] = remotes_info
+
+        # === 5. Description ===
+        desc_path = os.path.join(repo_path, "description")
+        description = ""
+        if os.path.exists(desc_path):
+            try:
+                with open(desc_path, "r", encoding="utf-8") as f:
+                    description = f.read().strip()
+            except:
+                description = "(unable to read)"
+        sync_result["description"] = description
+
+        # === 6. Commits ===
+        command = [
+            GIT_EXECUTABLE, "-C", repo_path,
+            "log", "--max-count=300", "--date=iso",
+            "--pretty=format:%H|%P|%an|%ae|%ad|%s"
+        ]
         process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         stdout, stderr = process.communicate()
+
         commits = []
         if process.returncode == 0:
-            commit_lines = stdout.decode('utf-8').splitlines()
-            for line in commit_lines:
+            for line in stdout.decode('utf-8').splitlines():
                 if line.strip():
                     try:
                         sha, parents, author_name, author_email, date, message = line.split("|", 5)
-                        parents_list = parents.split() if parents else []
                         commits.append({
                             "sha": sha,
-                            "parents": parents_list,
+                            "parents": parents.split() if parents else [],
                             "author_name": author_name,
                             "author_email": author_email,
                             "date": date,
                             "message": message
                         })
                     except ValueError:
-                        logger.warning("Malformed commit line in repo %s: %s", repo_name, line)
+                        logger.warning(f"Malformed commit line in {repo_name}: {line}")
         else:
-            logger.warning("Failed to fetch commits for repo %s: %s", repo_name, stderr.decode('utf-8'))
-        repo["commits"] = commits
-        
-        # Add files list and total size
+            logger.warning(f"Failed to fetch commits for {repo_name}: {stderr.decode()}")
+        sync_result["commits"] = commits
+
+        # === 7. Files + size ===
         files, total_size = get_file_list(repo_path)
-        repo["files"] = files
-        repo["storage_size"] = total_size
-        
-        # Add README text
-        repo["readme"] = get_readme_text(repo_path)
-        
+        sync_result["files"] = files
+        sync_result["storage_size"] = total_size
+
+        # === 8. README ===
+        sync_result["readme"] = get_readme_text(repo_path)
+
+        logger.info(f"Full sync completed for {repo_name} — {len(sync_result.get('errors', []))} errors")
+
+    except Exception as e:
+        logger.exception(f"Full sync failed for {repo_name}")
+        sync_result["errors"].append(str(e))
+        sync_result["status"] = {"error": "sync_failed"}
+
+    return sync_result
+
+def collect_repo_details():
+    """
+    Collect detailed information about all local repositories.
+    Returns the same structure as before — fully compatible.
+    """
+    servers = {"name": "Origin Server", "repos": []}
+
+    for repo_path in REPOSITORIES:
+        repo_name = os.path.basename(repo_path)
+
+        # === ELITE: Use full_sync() for one repo ===
+        sync_result = full_sync(str(repo_path), repo_name)
+
+        # Build repo dict — EXACT SAME STRUCTURE AS BEFORE
+        repo = {
+            "name": repo_name,
+            "branch": sync_result.get("status", {}).get("branch", "HEAD"),
+            "status": sync_result.get("status", {"error": "sync_failed"}),
+            "remote_heads": sync_result.get("remote_heads", {}),
+            "remotes": sync_result.get("remotes", []),
+            "branches": sync_result.get("branches", {"error": "branches_failed"}),
+            "commits": sync_result.get("commits", []),
+            "files": sync_result.get("files", []),
+            "storage_size": sync_result.get("storage_size", 0),
+            "readme": sync_result.get("readme", "")
+        }
+
         servers["repos"].append(repo)
-    
+
     return servers
 
 def safe_rev_parse(repo_path, ref):
@@ -2827,13 +2887,18 @@ def process_tasks(tasks):
         "pull"
     }
 
+    FULL_SYNC_ACTIONS = {
+        "import_repo",
+        "create_repo"
+    }
+
     for task in tasks:
         logger.debug(f"Task details: {task}")
         action = task.get('action')
         params = task.get('params', {})
         repo_name = params.get('repo_name')
 
-        if action == "create_repo":
+        if action == "create_repo" or action == "import_repo":
             repo_path = None
         else:
             repo_path = find_repo_path_by_name(repo_name)
@@ -2846,7 +2911,8 @@ def process_tasks(tasks):
         task_result = {"task_id": task['id'], 'repo_name': repo_name}
         needs_status_refresh = action in STATUS_CHANGING_ACTIONS
         needs_heads_refresh = action in HEADS_CHANGING_ACTIONS
-
+        needs_full_sync = action in FULL_SYNC_ACTIONS
+        
         # Capture old/previous remote heads
         if action in HEADS_CHANGING_ACTIONS:
             task["previous_remote_heads"] = git_utils.get_remote_heads(repo_path) or {}
@@ -3688,7 +3754,7 @@ def process_tasks(tasks):
                         ], check=True)
                         shutil.rmtree(workdir)  # cleanup temporary workdir
 
-                added = settings.add_repository(repo_path)
+                settings.add_repository(repo_path)
 
                 task_result["result"] = {
                     "repo_uuid": repo_uuid,
@@ -3726,6 +3792,57 @@ def process_tasks(tasks):
                 task_result["result"] = {"status": "not_found"}
                 logger.warning(f"Repository '{repo_name}' could not be resolved to a path")
               
+        elif action == "import_repo":
+            remote_url = params.get("remote_url")
+            repo_uuid = params.get("repo_uuid")
+            repo_name = params.get("repo_name")
+            auth_type = params.get("auth_type", "none")
+            auth_secret = params.get("auth_secret", "")
+            bare = params.get("bare", True)  # default True if not provided
+
+            repo_path = os.path.join(REPO_BASE, repo_name)
+
+            try:
+                os.makedirs(repo_path, exist_ok=True)
+
+                # Adjust clone command based on bare flag
+                clone_cmd = [GIT_EXECUTABLE, "clone"]
+                if bare:
+                    clone_cmd.append("--bare")
+
+                # Handle authentication
+                if auth_type == "token":
+                    # HTTPS with token
+                    url_parts = remote_url.split("://")
+                    if len(url_parts) == 2:
+                        remote_url = f"{url_parts[0]}://{auth_secret}@{url_parts[1]}"
+                elif auth_type == "ssh":
+                    # Assume SSH key is already configured
+                    pass
+
+                clone_cmd += [remote_url, str(repo_path)]
+
+                result = subprocess.run(clone_cmd, check=True, capture_output=True, text=True)
+
+                settings.add_repository(repo_path)
+
+                task_result["result"] = {
+                    "status": "imported",
+                    "repo_uuid": repo_uuid,
+                    "repo_name": repo_name,
+                    "output": result.stdout
+                }
+
+                logger.info(f"Imported {remote_url} → {repo_path} (bare={bare})")
+
+            except subprocess.CalledProcessError as e:
+                task_result.update({"error": f"Clone failed: {e.stderr}"})
+                logger.error(f"Git clone failed: {e.stderr}")
+            except Exception as e:
+                task_result.update({"error": str(e)})
+                logger.exception(f"Unexpected error importing repository: {e}")
+                        
+
         else:
             logger.warning(f"Unknown action: {action}")
             results.append({"task_id": task['id'], "result": None, "error": f"Unknown action: {action}"})
@@ -3768,6 +3885,22 @@ def process_tasks(tasks):
                 task_result["result"]["repo_status"] = fresh_status
                 task_result["result"]["remote_heads"] = remote_heads  # ← This is gold
                 logger.debug(f"Fresh status attached after {action}")
+
+        if needs_full_sync:
+            sync_result = full_sync(repo_path, repo_name)
+    
+            task_result["result"]["repo_status"] = sync_result["status"]
+            task_result["result"]["remote_heads"] = sync_result["remote_heads"]
+
+            task_result["result"]["branches"] = sync_result["branches"]
+            task_result["result"]["remotes"] = sync_result["remotes"]
+            task_result["result"]["description"] = sync_result["description"]
+            task_result["result"]["new_commits"] = sync_result["commits"]
+            task_result["result"]["files"] = sync_result["files"]
+            task_result["result"]["storage_size"] = sync_result["storage_size"]
+            task_result["result"]["readme"] = sync_result["readme"]
+            
+
 
         results.append(task_result)
     

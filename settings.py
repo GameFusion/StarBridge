@@ -27,8 +27,10 @@ DEFAULT_SETTINGS = {
     }
 }
 
-# === LOAD SETTINGS ===
 _settings: Dict[str, Any] = {}
+
+def reload():
+    return load_settings(reload=True)
 
 def load_settings(reload: bool = False) -> Dict[str, Any]:
     """Load settings.json with defaults and validation"""
