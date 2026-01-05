@@ -3842,7 +3842,22 @@ def process_tasks(tasks):
                 task_result.update({"error": str(e)})
                 logger.exception(f"Unexpected error importing repository: {e}")
                         
+        elif action == "abort_merge":
 
+            try:
+                result = subprocess.run(
+                    [GIT_EXECUTABLE, "-C", str(repo_path), "merge", "--abort"],
+                    capture_output=True, text=True
+                )
+
+                if result.returncode == 0:
+                    task_result["result"] = {"status": "aborted"}
+                    logger.info(f"Merge aborted in {repo_name}")
+                else:
+                    task_result.update({"error": result.stderr.strip() or "Merge abort failed"})
+            except Exception as e:
+                task_result.update({"error": str(e)})
+                
         else:
             logger.warning(f"Unknown action: {action}")
             results.append({"task_id": task['id'], "result": None, "error": f"Unknown action: {action}"})
