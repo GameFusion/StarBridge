@@ -26,7 +26,7 @@ import shutil
 # auto-setup, will create .env and settings.json if not present
 import setup
 import git_utils
-
+import local_ip
 
 # Configure logging
 logging.basicConfig(
@@ -2470,7 +2470,8 @@ def send_heartbeat_to_stargit(batch_mode=False):
         "event_type": "heartbeat",
         "status": "online",
         "timestamp": time.time(),
-        "ip_address": ip_address
+        "ip_address": ip_address,
+        "ip_locals": local_ip.get_local_ip_addresses()
     }
 
     metrics = collect_server_metrics()
@@ -2578,7 +2579,8 @@ def register_with_stargit(event_type='online'):
             "status": "online",
             "metrics": metrics,
             "timestamp": time.time(),
-            "ip_address": requests.get('https://api.ipify.org').text if event_type == 'online' else None
+            "ip_address": requests.get('https://api.ipify.org').text if event_type == 'online' else None,
+            "ip_locals": local_ip.get_local_ip_addresses()
         }
         # Include detailed repo info only in heartbeats if PUSH_MODE is enabled
         if event_type == 'heartbeat' and PUSH_MODE:
