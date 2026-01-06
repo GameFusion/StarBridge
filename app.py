@@ -2875,7 +2875,8 @@ def process_tasks(tasks):
         "checkout_file",    # future
         "push",
         "pull",
-        "create_file"
+        "create_file",
+        "abort_merge"
     }
 
     HEADS_CHANGING_ACTIONS = {
