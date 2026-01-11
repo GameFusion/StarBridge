@@ -4,6 +4,18 @@ import uuid
 import json
 from pathlib import Path
 
+def prompt_for_stargit_api_key():
+    print()
+    print("🔐 Stargit API Key (optional)")
+    print("----------------------------")
+    print("To obtain this key, log in to:")
+    print("https://stargit.com")
+    print()
+    print("Press Enter to skip and add it later to the .env file.")
+    print()
+
+    return input("STARGIT_API_KEY: ").strip()
+
 def generate_api_key(length=32):
     """Generate a secure random API key."""
     return secrets.token_hex(length)
@@ -38,6 +50,18 @@ def generate_env_file():
         env_data['STARBRIDGE_SERVER_UUID'] = generate_server_uuid()
         updated = True
         print(f"Generated STARBRIDGE_SERVER_UUID: {env_data['STARBRIDGE_SERVER_UUID']}")
+
+    # Ensure Stargit user API key exists (optional, user-provided)
+    if 'STARGIT_API_KEY' not in env_data:
+        stargit_key = prompt_for_stargit_api_key()
+
+        if stargit_key:
+            env_data['STARGIT_API_KEY'] = stargit_key
+            updated = True
+            print("Saved STARGIT_API_KEY to .env")
+        else:
+            print("STARGIT_API_KEY not set. You can add it later manually:")
+            print("STARGIT_API_KEY=your_key_here")
 
     # Ensure other defaults
     defaults = {
@@ -114,7 +138,6 @@ def setup_starbridge():
     print("2. Ensure your SSL certificates are correctly set up as specified in settings.json.")
     print("3. Run the application: `python app.py` or enable the starbridge.service systemd unit.")
     print("4. The API key will be used for authentication, and the server UUID will identify this instance to Stargit.")
-
 
 if __name__ == '__main__':
     print("Starting StarBridge command-line setup...")
