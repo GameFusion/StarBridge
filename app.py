@@ -2902,7 +2902,7 @@ def process_tasks(tasks):
         params = task.get('params', {})
         repo_name = params.get('repo_name')
 
-        if action == "create_repo" or action == "import_repo":
+        if action == "create_repo" or action == "import_repo" or action == "update_starbridge":
             repo_path = None
         else:
             repo_path = find_repo_path_by_name(repo_name)
@@ -3897,14 +3897,14 @@ def process_tasks(tasks):
                     }
 
 
-                    # 2. Schedule application exit after response is sent
+                    # === Delayed exit in background thread ===
                     def delayed_exit():
-                        logger.info("Update complete → restarting StarBridge...")
-                        time.sleep(1.5)  # small delay to ensure response is sent
-                        sys.exit(0)
-                    
-                    atexit.register(delayed_exit)  # ← register exit after success
-                    task_result["status"] = "update_triggered"
+                        logger.info("Update complete — scheduling graceful restart...")
+                        time.sleep(3)  # 3 seconds — enough for response to flush + nginx to close connection
+                        logger.info("Restarting StarBridge now...")
+                        os._exit(0)  # Hard exit — bypass atexit and cleanup
+
+                    threading.Thread(target=delayed_exit, daemon=True).start()
     
                 else:
                     error_msg = result.stderr.strip() or "Git pull failed"

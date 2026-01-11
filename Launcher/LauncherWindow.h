@@ -53,5 +53,7 @@ private:
     QMenu *trayMenu;
     QAction *showAction;
     QAction *quitAction;
+
+    enum {WTS, Play, Stop, Pause} State;
 };
 
