@@ -4054,7 +4054,7 @@ if STARGIT_API_KEY:
     threading.Thread(target=registration_thread, daemon=True).start()
     threading.Thread(target=poll_thread, daemon=True).start()
 else:
-    logger.info("No hearteat - hearbeat disabled", flush=True)
+    logger.info("No hearteat - hearbeat disabled")
 
 # Endpoins for web server querying status and configuration
 # TODO : Secure these endpoints with authentication if exposed publicly
