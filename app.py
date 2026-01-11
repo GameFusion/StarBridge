@@ -1,4 +1,5 @@
 
+import atexit
 from flask import Flask, request, jsonify, abort, make_response, send_file
 import os
 from dotenv import load_dotenv
@@ -3860,7 +3861,60 @@ def process_tasks(tasks):
                     task_result.update({"error": result.stderr.strip() or "Merge abort failed"})
             except Exception as e:
                 task_result.update({"error": str(e)})
-                
+        
+        elif action == "list_all_untracked":
+            
+            try:
+                result = subprocess.run(
+                    [GIT_EXECUTABLE, "-C", str(repo_path), "ls-files", "--others", "--exclude-standard"],
+                    capture_output=True, text=True, check=True
+                )
+                untracked = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+                task_result["result"] = {"untracked": untracked}
+            except Exception as e:
+                task_result.update({"error": str(e)})
+
+        elif action == "update_starbridge":
+            repo_path = os.getcwd()  # The directory where StarBridge is running
+
+            try:
+                # 1. Perform git pull
+                result = subprocess.run(
+                    ["git", "-C", repo_path, "pull", "--ff-only"],
+                    capture_output=True,
+                    text=True,
+                    check=False
+                )
+
+                if result.returncode == 0:
+                    output = result.stdout.strip()
+                    logger.info(f"Git pull successful in {repo_path}: {output}")
+
+                    task_result["result"] = {
+                        "status": "updated",
+                        "output": output,
+                        "new_commit": git_utils.get_current_commit_sha(repo_path)
+                    }
+
+
+                    # 2. Schedule application exit after response is sent
+                    def delayed_exit():
+                        logger.info("Update complete → restarting StarBridge...")
+                        time.sleep(1.5)  # small delay to ensure response is sent
+                        sys.exit(0)
+                    
+                    atexit.register(delayed_exit)  # ← register exit after success
+                    task_result["status"] = "update_triggered"
+    
+                else:
+                    error_msg = result.stderr.strip() or "Git pull failed"
+                    logger.error(f"Git pull failed in {repo_path}: {error_msg}")
+                    task_result.update({"error": error_msg})
+
+            except Exception as e:
+                logger.exception(f"Update failed in {repo_path}")
+                task_result.update({"error": str(e)})
+            
         else:
             logger.warning(f"Unknown action: {action}")
             results.append({"task_id": task['id'], "result": None, "error": f"Unknown action: {action}"})
