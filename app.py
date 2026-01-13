@@ -840,7 +840,7 @@ def get_git_status_data(repo_path, git_executable="git"):
                         summary["unstaged"].append(path)
 
                 elif code == "u":
-                    path = " ".join(parts[8:]) if len(parts) > 8 else parts[-1]
+                    path = parts[-1]   # porcelain v2 guarantees path is last
                     summary["conflicts"].append(path)
 
                 elif code == "?":
