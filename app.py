@@ -3151,7 +3151,7 @@ def process_tasks(tasks):
 
                     # If merge failed and no rebase is present → fatal
                     elif not is_rebase:
-                        result.append({
+                        results.append({
                             "task_id": task["id"],
                             "error": merge_result.stderr or merge_result.stdout or "Unknown merge error"
                         })
