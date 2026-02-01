@@ -4033,19 +4033,21 @@ def poll_for_tasks(results=None):
     except Exception as e:
         logger.error(f"Error during poll: {str(e)}")
         return []
-    
+
+def pull_tasks():
+    tasks = poll_for_tasks()
+    if tasks:
+        results = process_tasks(tasks)
+        # Immediately send results
+        poll_for_tasks(results)  # Send results immediately by polling again with results
+        return results
+    return []
+
 # Poll thread (separate from registration_thread for different interval)
 def poll_thread():
-    results = []  # Start with empty
+    
     while True:
-        #_pause_event.wait()
-
-        tasks = poll_for_tasks(results)
-        if tasks:
-            results = process_tasks(tasks)
-            # Immediately send results
-            poll_for_tasks(results)  # Send results immediately by polling again with results
-            results = []  # Clear after sending
+        pull_tasks()
         time.sleep(1.0)  # Every 5 seconds; adjust via env var if needed
 
 # Start registration thread
