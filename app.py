@@ -3979,9 +3979,13 @@ def process_tasks(tasks):
     logger.debug(f"Processed results: {results}")
     return results
 
+#
+# Poll logic and system
+#
+
 # Poll function (reuses your access_token logic)
 def poll_for_tasks(results=None):
-    verbose = False
+    verbose = True
     if verbose:
         logger.debug("Polling for tasks")
     if not STARGIT_API_KEY:
@@ -4045,16 +4049,85 @@ def pull_tasks():
 
 # Poll thread (separate from registration_thread for different interval)
 def poll_thread():
-    
     while True:
         pull_tasks()
         time.sleep(1.0)  # Every 5 seconds; adjust via env var if needed
 
+### 
+#
+# Polling with monitoring
+#
+
+# === GLOBAL POLLING CONTROL ===
+poll_thread = None
+poll_thread_active = threading.Event()  # Set when polling should run
+last_successful_poll = None  # Heartbeat timestamp
+POLL_HEARTBEAT_TIMEOUT = 45  # seconds — if no poll > this, consider stalled
+
+def polling_loop():
+    global last_successful_poll
+    poll_thread_active.set()
+    logger.info("Polling loop started")
+
+    while poll_thread_active.is_set():
+        try:
+            pull_tasks()  # Your existing poll function
+            last_successful_poll = time.time()
+            logger.debug("Successful poll cycle")
+            logger.info("Successful poll cycle")
+        except Exception as e:
+            logger.exception("Polling loop error — will retry")
+            logger.info("Polling loop error — will retry")
+            time.sleep(5)  # backoff
+
+        time.sleep(10)  # Poll interval
+
+    logger.info("Polling loop stopped")
+
+def start_polling_thread():
+    global poll_thread
+
+    logging.info("Starting/restarting polling thread")
+
+    if poll_thread and poll_thread.is_alive():
+        logger.warning("Polling thread already running — restarting")
+        poll_thread_active.clear()
+        poll_thread.join(timeout=5.0)
+
+    poll_thread_active.set()
+    poll_thread = threading.Thread(target=polling_loop, daemon=True, name="StarBridge-Polling")
+    poll_thread.start()
+    logger.info("Polling thread started/restarted")
+
+# === MONITOR POLLING HEALTH ===
+def monitor_polling_health():
+    global last_successful_poll
+
+    logger.info("Starting polling health monitor thread")
+    start_polling_thread()
+
+    while True:
+        logging.info("Monitoring polling health...")
+        logging.debug(f"Last successful poll at: {last_successful_poll}")
+        logging.debug(f"Current time: {time.time()}")
+        logging.debug(f"Time since last poll: {time.time() - last_successful_poll if last_successful_poll else 'N/A'}")
+        logging.debug(f"POLL_HEARTBEAT_TIMEOUT: {POLL_HEARTBEAT_TIMEOUT}")
+
+        if last_successful_poll and (time.time() - last_successful_poll > POLL_HEARTBEAT_TIMEOUT):
+            logger.critical(f"Polling stalled for >{POLL_HEARTBEAT_TIMEOUT}s — restarting thread")
+            start_polling_thread()
+        time.sleep(10)  # Check every 10s
+
 # Start registration thread
 if STARGIT_API_KEY:
     logger.info("Loaded STARBRIDGE_SERVER_UUID: %s", SERVER_UUID)
+
     threading.Thread(target=registration_thread, daemon=True).start()
-    threading.Thread(target=poll_thread, daemon=True).start()
+    
+    # threading.Thread(target=poll_thread, daemon=True).start()
+    # === START MONITORING THREAD ===
+    monitor_thread = threading.Thread(target=monitor_polling_health, daemon=True, name="Polling-Monitor")
+    monitor_thread.start()
 else:
     logger.info("No hearteat - hearbeat disabled", flush=True)
 
@@ -4088,21 +4161,34 @@ def internal_logs():
 @app.route('/health')
 def health():
     """Simple health check endpoint"""
+    global last_successful_poll
 
     frontend_port = os.getenv("ADMIN_PORT", "5002")
     frontend_url = f"http://127.0.0.1:{frontend_port}"
 
-    return jsonify({
-        "status": "healthy",
-        "service": "StarGit",
+    now = time.time()
+    polling_healthy = last_successful_poll and (now - last_successful_poll <= POLL_HEARTBEAT_TIMEOUT)
+    status = "healthy" if polling_healthy else "degraded"
+
+    result = jsonify({
+        "status": status,
+        "service": "StarBridge",
         "timestamp": datetime.utcnow().isoformat() + "Z",
-        "version": "1.0.0",  # todo: replace with your actual version
+        "version": "1.0.0",
         "ports": {
             "backend": int(request.host.split(':')[1]) if ':' in request.host else 5001,
             "frontend": int(frontend_port),
             "frontend_url": frontend_url
+        },
+        "polling": {
+            "active": poll_thread_active.is_set(),
+            "last_success": last_successful_poll,
+            "seconds_since_last": round(now - last_successful_poll, 1) if last_successful_poll else None,
+            "healthy": polling_healthy
         }
-    }), 200
+    })
+    print("Health check result:", result.get_json(), flush=True)
+    return result, 200
 
 
 @app.route('/kill')
