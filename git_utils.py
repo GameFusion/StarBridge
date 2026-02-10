@@ -3,6 +3,7 @@ import subprocess
 from subprocess import Popen, PIPE
 import logging
 from pathlib import Path
+from datetime import datetime, timezone
 
 logger = logging.getLogger('StarBridge')
 
@@ -196,46 +197,133 @@ def get_remote_heads(repo_path, timeout=3):
     - BatchMode=yes (no SSH password prompts)
     """
 
-    remote_name = "origin"
-    remote_name = None
+    details = get_remote_heads_details(repo_path, timeout=timeout)
+    return details.get("canonical_heads", {})
 
-    env = os.environ.copy()
-    env["GIT_TERMINAL_PROMPT"] = "0"     # Disable HTTPS prompts
-    env["GIT_SSH_COMMAND"] = "ssh -o BatchMode=yes"  # Disable SSH passphrases
 
-    if remote_name:
-        cmd = [GIT_EXECUTABLE, "-C", repo_path, "ls-remote", remote_name]
-    else:
-        cmd = [GIT_EXECUTABLE, "-C", repo_path, "ls-remote"]
-    try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            env=env,
-        )
-    except subprocess.TimeoutExpired:
-        return {"error": "timeout"}
-    except Exception as e:
-        return {"error": str(e)}
-
-    if result.returncode != 0:
-        return {"error": result.stderr.strip() or "ls-remote failed"}
-
+def _parse_heads_from_ls_remote(stdout):
     heads = {}
-    for line in result.stdout.splitlines():
+    for line in stdout.splitlines():
         if "\t" not in line:
             continue
         sha, ref = line.split("\t", 1)
-
         if ref.startswith("refs/heads/"):
             heads[ref[len("refs/heads/"):]] = sha
-
-        elif ref.startswith(f"refs/remotes/{remote_name}/"):
-            heads[ref[len(f"refs/remotes/{remote_name}/"):]] = sha
-
     return heads
+
+
+def _pick_canonical_remote(remotes):
+    """
+    Pick canonical remote with fallback:
+    1) Prefer healthy origin (no error + has heads)
+    2) Else first healthy remote (no error + has heads)
+    3) Else origin if present (for stability/debug visibility)
+    4) Else first available remote
+    """
+    if not remotes:
+        return None
+
+    def is_healthy(name):
+        data = remotes.get(name) or {}
+        heads = data.get("heads") or {}
+        err = data.get("error")
+        return (not err) and bool(heads)
+
+    if "origin" in remotes and is_healthy("origin"):
+        return "origin"
+
+    for name in remotes.keys():
+        if is_healthy(name):
+            return name
+
+    if "origin" in remotes:
+        return "origin"
+
+    return next(iter(remotes), None)
+
+
+def get_remote_heads_details(repo_path, timeout=3):
+    """
+    Collect remote heads per remote without failing the whole result if one remote is bad.
+
+    Returns:
+    {
+      "fetched_at": "...Z",
+      "canonical_remote": "origin",
+      "canonical_heads": {"main": "..."},
+      "remotes": {
+         "origin": {"heads": {...}, "error": "...", "url_fetch": "...", "url_push": "..."},
+         "github": {"heads": {...}, "error": None, ...}
+      }
+    }
+    """
+    env = os.environ.copy()
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    env["GIT_SSH_COMMAND"] = "ssh -o BatchMode=yes"
+
+    # Discover remotes and urls first.
+    remotes_result = subprocess.run(
+        [GIT_EXECUTABLE, "-C", repo_path, "remote", "-v"],
+        capture_output=True,
+        text=True
+    )
+
+    remotes = {}
+    if remotes_result.returncode == 0:
+        for line in remotes_result.stdout.splitlines():
+            parts = line.split()
+            if len(parts) < 3:
+                continue
+            name, url, typ = parts[0], parts[1], parts[2].strip("()")
+            if name not in remotes:
+                remotes[name] = {"heads": {}, "error": None, "url_fetch": None, "url_push": None}
+            if typ == "fetch":
+                remotes[name]["url_fetch"] = url
+            elif typ == "push":
+                remotes[name]["url_push"] = url
+
+    # If no remotes discovered, return empty stable structure.
+    if not remotes:
+        return {
+            "fetched_at": datetime.now(timezone.utc).isoformat(),
+            "canonical_remote": None,
+            "canonical_heads": {},
+            "remotes": {}
+        }
+
+    # Query each remote independently to avoid one failure poisoning all.
+    for remote_name in remotes.keys():
+        try:
+            result = subprocess.run(
+                [GIT_EXECUTABLE, "-C", repo_path, "ls-remote", remote_name],
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                env=env,
+            )
+            if result.returncode != 0:
+                remotes[remote_name]["error"] = result.stderr.strip() or "ls-remote failed"
+                remotes[remote_name]["heads"] = {}
+                continue
+
+            remotes[remote_name]["heads"] = _parse_heads_from_ls_remote(result.stdout)
+            remotes[remote_name]["error"] = None
+        except subprocess.TimeoutExpired:
+            remotes[remote_name]["error"] = "timeout"
+            remotes[remote_name]["heads"] = {}
+        except Exception as e:
+            remotes[remote_name]["error"] = str(e)
+            remotes[remote_name]["heads"] = {}
+
+    canonical_remote = _pick_canonical_remote(remotes)
+    canonical_heads = remotes.get(canonical_remote, {}).get("heads", {}) if canonical_remote else {}
+
+    return {
+        "fetched_at": datetime.now(timezone.utc).isoformat(),
+        "canonical_remote": canonical_remote,
+        "canonical_heads": canonical_heads,
+        "remotes": remotes
+    }
 
 def get_current_commit_sha(repo_path: Path) -> str:
     try:

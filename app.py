@@ -2011,9 +2011,10 @@ def full_sync(repo_path: str, repo_name: str = None) -> dict:
         else:
             sync_result["status"] = status_data
 
-        # === 2. Remote heads ===
-        remote_heads = git_utils.get_remote_heads(repo_path)
-        sync_result["remote_heads"] = remote_heads
+        # === 2. Remote heads (canonical + per-remote meta/errors) ===
+        remote_heads_details = git_utils.get_remote_heads_details(repo_path)
+        sync_result["remote_heads"] = remote_heads_details.get("canonical_heads", {})
+        sync_result["remote_heads_meta"] = remote_heads_details
 
         # === 3. Branches ===
         branches, branches_error = get_branches_data(repo_path)
@@ -2114,6 +2115,7 @@ def collect_repo_details():
             "branch": sync_result.get("status", {}).get("branch", "HEAD"),
             "status": sync_result.get("status", {"error": "sync_failed"}),
             "remote_heads": sync_result.get("remote_heads", {}),
+            "remote_heads_meta": sync_result.get("remote_heads_meta", {}),
             "remotes": sync_result.get("remotes", []),
             "branches": sync_result.get("branches", {"error": "branches_failed"}),
             "commits": sync_result.get("commits", []),
@@ -2190,6 +2192,7 @@ def collect_and_send_repo_summary(repo_path, include_remote=True):
         "heads": {},
         "status": {"action_summary": "Error", "action_message": "Failed to collect status"},
         "remote_heads": {},
+        "remote_heads_meta": {},
         "diff": {"diff": "", "diff_info": {"original_size": 0, "status": "complete"}}
     }
 
@@ -2223,8 +2226,9 @@ def collect_and_send_repo_summary(repo_path, include_remote=True):
         # 3. Remote heads (non-blocking)
         if include_remote:
             try:
-                remote_heads = git_utils.get_remote_heads(repo_path, timeout=3)
-                summary["remote_heads"] = remote_heads or {}
+                remote_heads_details = git_utils.get_remote_heads_details(repo_path, timeout=3)
+                summary["remote_heads"] = remote_heads_details.get("canonical_heads", {})
+                summary["remote_heads_meta"] = remote_heads_details
             except Exception as e:
                 logger.debug(f"[{repo_name}] Remote heads failed (normal): {e}")
 
@@ -3923,7 +3927,8 @@ def process_tasks(tasks):
         # === AUTO-REFRESH AHEADS AND BEHIND ON HEADS-CHANGING ACTIONS: Check if remote_heads changed ===
 
         if needs_heads_refresh or needs_status_refresh:
-            remote_heads = git_utils.get_remote_heads(repo_path)
+            remote_heads_details = git_utils.get_remote_heads_details(repo_path)
+            remote_heads = remote_heads_details.get("canonical_heads", {})
 
         if needs_heads_refresh:
             ahead, behind = git_utils.get_ahead_behind(repo_path)
@@ -3931,6 +3936,7 @@ def process_tasks(tasks):
                 task_result["result"] = {}
             task_result["result"]["ahead"] = ahead
             task_result["result"]["behind"] = behind
+            task_result["result"]["remote_heads_meta"] = remote_heads_details
 
             # Compare with what we had before this task
             old_remote_heads = task.get("previous_remote_heads") or {}
@@ -3956,6 +3962,7 @@ def process_tasks(tasks):
                     task_result["result"] = {}
                 task_result["result"]["repo_status"] = fresh_status
                 task_result["result"]["remote_heads"] = remote_heads  # ← This is gold
+                task_result["result"]["remote_heads_meta"] = remote_heads_details
                 logger.debug(f"Fresh status attached after {action}")
 
         if needs_full_sync:
@@ -3963,6 +3970,7 @@ def process_tasks(tasks):
     
             task_result["result"]["repo_status"] = sync_result["status"]
             task_result["result"]["remote_heads"] = sync_result["remote_heads"]
+            task_result["result"]["remote_heads_meta"] = sync_result.get("remote_heads_meta", {})
 
             task_result["result"]["branches"] = sync_result["branches"]
             task_result["result"]["remotes"] = sync_result["remotes"]
