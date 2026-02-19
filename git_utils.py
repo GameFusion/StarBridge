@@ -2,6 +2,7 @@ import os
 import subprocess
 from subprocess import Popen, PIPE
 import logging
+import shutil
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -9,7 +10,18 @@ logger = logging.getLogger('StarBridge')
 
 import settings
 
-GIT_EXECUTABLE = settings.get("git_executable")
+configured_git = settings.get("git_executable", "git")
+if configured_git and os.path.isabs(configured_git) and os.path.exists(configured_git):
+    GIT_EXECUTABLE = configured_git
+else:
+    GIT_EXECUTABLE = shutil.which(configured_git or "git") or shutil.which("git") or "git"
+
+if GIT_EXECUTABLE != configured_git:
+    logger.warning(
+        "Configured git_executable '%s' not found; using '%s' instead",
+        configured_git,
+        GIT_EXECUTABLE
+    )
 
 def is_file_tracked(repo_path: str | Path, file_path: str | Path) -> bool:
     """

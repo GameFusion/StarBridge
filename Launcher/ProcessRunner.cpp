@@ -1,9 +1,11 @@
 #include "ProcessRunner.h"
 #include <QDir>
 #include <QDebug>
+#include <QFile>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QNetworkRequest>
+#include <QTextStream>
 #include <QTimer>
 
 ProcessRunner::ProcessRunner(QObject *parent)
@@ -11,6 +13,13 @@ ProcessRunner::ProcessRunner(QObject *parent)
 {
     connect(&process, &QProcess::readyReadStandardOutput, this, &ProcessRunner::onReadyReadStandardOutput);
     connect(&process, &QProcess::readyReadStandardError, this, &ProcessRunner::onReadyReadStandardError);
+    connect(&process, &QProcess::started, this, [this]() {
+        emit logMessage(QString("StarBridge process started (pid=%1)").arg(process.processId()), false);
+    });
+    connect(&process, &QProcess::errorOccurred, this, [this](QProcess::ProcessError err) {
+        Q_UNUSED(err);
+        emit logMessage(QString("Process start/runtime error: %1").arg(process.errorString()), true);
+    });
     connect(&process, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
             this, &ProcessRunner::onProcessFinished);
 }
@@ -145,44 +154,52 @@ void ProcessRunner::waitAndStart(QString port, QNetworkAccessManager *manager)
 
 void ProcessRunner::startProcess()
 {
-    QStringList args;
-    args << "app.py";
-
     emit logMessage("Working directory: " + QDir::currentPath(), false);
 
     QString pythonPath = QDir::currentPath() + "/venv/bin/python";
     QString appPath = QDir::currentPath() + "/app.py";
 
-    // Verify files exist
-    if (!QFile::exists(pythonPath)) {
-        emit logMessage("ERROR: venv/bin/python not found!", true);
-        return;
-    }
-    if (!QFile::exists(appPath)) {
-        emit logMessage("ERROR: app.py not found!", true);
-        return;
-    }
+
 
     // Build proper environment with venv/bin in PATH
     QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
     // Add venv/bin to PATH (macOS/Linux + Windows)
     QString venvBin = QDir::currentPath() + "/venv/bin";
 #ifdef Q_OS_WIN
-    venvBin = basePath + "\\venv\\Scripts";  // Windows uses Scripts/
+    pythonPath = QDir::currentPath() + "\\venv\\Scripts\\python.exe";
+    venvBin = QDir::currentPath() + "\\venv\\Scripts";
 #endif
-    QString currentPath = env.value("PATH");
-    QString newPath = venvBin + QString(QDir::separator()) + ".." + QDir::separator() + currentPath;
 
+    // Verify files exist
+    if (!QFile::exists(pythonPath)) {
+        emit logMessage("ERROR (python not found): "+pythonPath+" not found!", true);
+        return;
+    }
+    if (!QFile::exists(appPath)) {
+        emit logMessage("ERROR (app not found): "+appPath+" not found!", true);
+        return;
+    }
+
+    QString currentPath = env.value("PATH");
     env.insert("PATH", venvBin + QDir::listSeparator() + currentPath);
 
     // Optional: Force Python to use correct venv
-    env.insert("VIRTUAL_ENV", QDir::currentPath() + "/venv");
-    env.insert("PYTHONPATH", QDir::currentPath());  // if needed
+    env.insert("VIRTUAL_ENV", QDir::toNativeSeparators(QDir::currentPath() + "/venv"));
+    env.insert("PYTHONPATH", QDir::toNativeSeparators(QDir::currentPath()));
+    env.insert("PYTHONUNBUFFERED", "1");
+    env.insert("PYTHONIOENCODING", "utf-8");
 
     process.setProcessEnvironment(env);
 
     process.setWorkingDirectory(QDir::currentPath());
-    process.start("venv/bin/python", args);
+    process.setProgram(QDir::toNativeSeparators(pythonPath));
+    process.setArguments(QStringList() << QDir::toNativeSeparators(appPath));
+    process.start();
+
+    if (!process.waitForStarted(5000)) {
+        emit logMessage(QString("Failed to start StarBridge: %1").arg(process.errorString()), true);
+        return;
+    }
 
     emit logMessage("Starting StarBridge...", false);
 

@@ -1,17 +1,6 @@
 import socket
 import json
 import platform
-import json
-from datetime import datetime
-
-try:
-    import netifaces
-    HAS_NETIFACES = True
-except ImportError:
-    HAS_NETIFACES = False
-
-import socket
-import platform
 from datetime import datetime, timezone
 
 try:
@@ -53,7 +42,6 @@ def get_local_ip_addresses() -> dict:
                         if ip not in seen_ipv4:
                             seen_ipv4.add(ip)
                             result["ipv4"].append(ip)
-                            # Set primary if it's real (not loopback)
                             if result["primary_ipv4"] is None and not ip.startswith("127."):
                                 result["primary_ipv4"] = ip
 
@@ -64,40 +52,60 @@ def get_local_ip_addresses() -> dict:
                         if ip not in seen_ipv6:
                             seen_ipv6.add(ip)
                             result["ipv6"].append(ip)
-                            # Prefer global over link-local
                             if result["primary_ipv6"] is None and not ip.startswith("fe80::") and ip != "::1":
                                 result["primary_ipv6"] = ip
 
         else:
-            # Minimal fallback using socket
+            # Fallback: socket method
             hostname = socket.gethostname()
+
+            # IPv4
             try:
-                for info in socket.getaddrinfo(hostname, None):
+                for info in socket.getaddrinfo(hostname, None, socket.AF_INET):
                     ip = info[4][0]
-                    if info[0] == socket.AF_INET and ip not in seen_ipv4:
+                    if ip not in seen_ipv4:
                         seen_ipv4.add(ip)
                         result["ipv4"].append(ip)
                         if result["primary_ipv4"] is None and not ip.startswith("127."):
                             result["primary_ipv4"] = ip
-                    elif info[0] == socket.AF_INET6:
-                        ip_clean = ip.split('%')[0]
-                        if ip_clean not in seen_ipv6:
-                            seen_ipv6.add(ip_clean)
-                            result["ipv6"].append(ip_clean)
-                            if result["primary_ipv6"] is None and not ip_clean.startswith("fe80::") and ip_clean != "::1":
-                                result["primary_ipv6"] = ip_clean
             except:
                 pass
 
-        # Ensure localhost is always included (useful for debugging)
+            # IPv6
+            try:
+                for info in socket.getaddrinfo(hostname, None, socket.AF_INET6):
+                    ip = info[4][0].split('%')[0]
+                    if ip not in seen_ipv6:
+                        seen_ipv6.add(ip)
+                        result["ipv6"].append(ip)
+                        if result["primary_ipv6"] is None and not ip.startswith("fe80::") and ip != "::1":
+                            result["primary_ipv6"] = ip
+            except:
+                pass
+
+            # On Linux: UDP trick for primary IPv4 if still None
+            if result["primary_ipv4"] is None and platform.system() == "Linux":
+                try:
+                    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                    s.connect(("8.8.8.8", 80))
+                    ip = s.getsockname()[0]
+                    s.close()
+                    if ip not in seen_ipv4:
+                        seen_ipv4.add(ip)
+                        result["ipv4"].append(ip)
+                    result["primary_ipv4"] = ip
+                except:
+                    pass
+
+        # Include localhost if missing
         if "127.0.0.1" not in seen_ipv4:
             result["ipv4"].append("127.0.0.1")
         if "::1" not in seen_ipv6:
             result["ipv6"].append("::1")
 
-        # Sort for consistency (real IPs first)
-        result["ipv4"] = sorted(result["ipv4"], key=lambda x: (x.startswith("127."), x))
-        result["ipv6"] = sorted(result["ipv6"], key=lambda x: (x in ["::1", "fe80::"], x))
+        # Sort: real IPs first
+        result["ipv4"] = sorted(result["ipv4"], key=lambda x: x.startswith("127."))
+        result["ipv6"] = sorted(result["ipv6"], key=lambda x: x in ["::1", "fe80::"])
 
     except Exception as e:
         result["error"] = str(e)
