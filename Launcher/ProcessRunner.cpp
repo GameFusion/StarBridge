@@ -153,23 +153,27 @@ void ProcessRunner::startProcess()
     QString pythonPath = QDir::currentPath() + "/venv/bin/python";
     QString appPath = QDir::currentPath() + "/app.py";
 
-    // Verify files exist
-    if (!QFile::exists(pythonPath)) {
-        emit logMessage("ERROR: venv/bin/python not found!", true);
-        return;
-    }
-    if (!QFile::exists(appPath)) {
-        emit logMessage("ERROR: app.py not found!", true);
-        return;
-    }
+
 
     // Build proper environment with venv/bin in PATH
     QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
     // Add venv/bin to PATH (macOS/Linux + Windows)
     QString venvBin = QDir::currentPath() + "/venv/bin";
 #ifdef Q_OS_WIN
-    venvBin = basePath + "\\venv\\Scripts";  // Windows uses Scripts/
+    pythonPath = QDir::currentPath() + "\\venv\\Scripts\\python.exe";
+    venvBin = QDir::currentPath() + "\\venv\\Scripts";
 #endif
+
+    // Verify files exist
+    if (!QFile::exists(pythonPath)) {
+        emit logMessage("ERROR (python not found): "+pythonPath+" not found!", true);
+        return;
+    }
+    if (!QFile::exists(appPath)) {
+        emit logMessage("ERROR (app not found): "+appPath+" not found!", true);
+        return;
+    }
+
     QString currentPath = env.value("PATH");
     QString newPath = venvBin + QString(QDir::separator()) + ".." + QDir::separator() + currentPath;
 

@@ -2,6 +2,7 @@
 import atexit
 from flask import Flask, request, jsonify, abort, make_response, send_file
 import os
+import sys
 from dotenv import load_dotenv
 from flask import Flask, request, jsonify, Response
 from subprocess import Popen, PIPE
@@ -4148,7 +4149,7 @@ def server_status():
 ENABLE_FRONTEND = os.getenv('ENABLE_FRONTEND', 'true').lower() == 'true'
 if ENABLE_FRONTEND:
     def start_frontend():
-        subprocess.Popen(['python', 'frontend.py'])
+        subprocess.Popen([sys.executable, 'frontend.py'])
     threading.Thread(target=start_frontend, daemon=True).start()
     logger.info(f"Frontend enabled and started on http://localhost:{ADMIN_PORT}")
 
