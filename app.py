@@ -3,6 +3,7 @@ import atexit
 from flask import Flask, request, jsonify, abort, make_response, send_file
 import os
 import sys
+import shutil
 from dotenv import load_dotenv
 from flask import Flask, request, jsonify, Response
 from subprocess import Popen, PIPE
@@ -29,6 +30,11 @@ import shutil
 import setup
 import git_utils
 import local_ip
+
+# Ensure console logging works on Windows terminals with non-ASCII messages.
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8", errors="replace")
 
 # Configure logging
 logging.basicConfig(
@@ -57,7 +63,26 @@ app = Flask(__name__)
 # Load settings from the JSON file
 import settings
 
-GIT_EXECUTABLE = settings.get("git_executable", "git")
+configured_git = settings.get("git_executable", "git")
+resolved_git = None
+
+if configured_git:
+    if os.path.isabs(configured_git) and os.path.exists(configured_git):
+        resolved_git = configured_git
+    else:
+        resolved_git = shutil.which(configured_git)
+
+if not resolved_git:
+    resolved_git = shutil.which("git") or "git"
+
+if resolved_git != configured_git:
+    logger.warning(
+        "Configured git_executable '%s' not found; using '%s' instead",
+        configured_git,
+        resolved_git
+    )
+
+GIT_EXECUTABLE = resolved_git
 REPOSITORIES = settings.get("repositories", [])
 CERT_PATH = settings.get("ssl.cert_path", "certs/cert.pem")      # dot notation
 KEY_PATH = settings.get("ssl.key_path", "certs/key.pem")
@@ -1861,7 +1886,7 @@ def get_access_token():
     """Fetch or refresh an access token."""
     global tokens
     verbose = False
-    if tokens['access_token'] and tokens['expires_at'] and datetime.utcnow() < tokens['expires_at'] - timedelta(seconds=60):
+    if tokens['access_token'] and tokens['expires_at'] and datetime.now(timezone.utc) < tokens['expires_at'] - timedelta(seconds=60):
         if verbose:
             logger.debug("Using existing valid access token")
         return tokens['access_token']
@@ -1876,7 +1901,7 @@ def get_access_token():
             if response.status_code == 200:
                 data = response.json()
                 tokens['access_token'] = data['access_token']
-                tokens['expires_at'] = datetime.utcnow() + timedelta(hours=1)
+                tokens['expires_at'] = datetime.now(timezone.utc) + timedelta(hours=1)
                 logger.info("Access token refreshed successfully")
                 return tokens['access_token']
             else:
@@ -1911,7 +1936,7 @@ def get_access_token():
             data = response.json()
             tokens['access_token'] = data['access_token']
             tokens['refresh_token'] = data.get('refresh_token')
-            tokens['expires_at'] = datetime.utcnow() + timedelta(hours=1)
+            tokens['expires_at'] = datetime.now(timezone.utc) + timedelta(hours=1)
             tokens['api_key_uuid'] = data.get('api_key_uuid') # optional: still store for reference
             logger.info("New access token fetched successfully for server_uuid: %s", SERVER_UUID)
             return tokens['access_token']
@@ -1999,7 +2024,7 @@ def full_sync(repo_path: str, repo_name: str = None) -> dict:
     sync_result = {
         "repo_name": repo_name,
         "repo_path": repo_path,
-        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "timestamp": datetime.now(timezone.utc).isoformat() + "Z",
         "errors": []
     }
 
@@ -2495,7 +2520,7 @@ def send_heartbeat_to_stargit(batch_mode=False):
 
     for repo_path in REPOSITORIES:
         repo_name = os.path.basename(repo_path)
-        logger.info(f">>>>>>>>>> Heartbeat → Processing repository: {repo_name}")
+        logger.info(f">>>>>>>>>> Heartbeat -> Processing repository: {repo_name}")
 
         # === 1. Collect summary for THIS repo only ===
         repo_name_out, summary = collect_and_send_repo_summary(repo_path)
@@ -2525,7 +2550,7 @@ def send_heartbeat_to_stargit(batch_mode=False):
             data = response.json()
             needed_deltas = data.get("needed_deltas", {})
 
-            # === 3. If server wants delta → compute and send immediately ===
+            # === 3. If server wants delta -> compute and send immediately ===
             if needed_deltas and repo_name in needed_deltas:
                 branch_deltas = needed_deltas[repo_name]
                 try:
@@ -3500,7 +3525,7 @@ def process_tasks(tasks):
 
             try:
                 # --- 1. Save current state as backup diff (undo safety) ---
-                backup_msg = f"StarGit backup before reset hard ({datetime.utcnow().isoformat()})"
+                backup_msg = f"StarGit backup before reset hard ({datetime.now(timezone.utc).isoformat()})"
                 
                 now_utc = datetime.now(timezone.utc)
                 timestamp = now_utc.strftime("%Y-%m-%d_%H-%M-%S")
@@ -3619,7 +3644,7 @@ def process_tasks(tasks):
             runner_id = params.get("runner_id")  # optional: specific runner
 
             try:
-                logger.info(f"Running CI/CD for {repo_name} → event: {event_name}")
+                logger.info(f"Running CI/CD for {repo_name} -> event: {event_name}")
 
                 # Use your elite CI runner
                 cmd = [
@@ -3838,7 +3863,7 @@ def process_tasks(tasks):
                     "output": result.stdout
                 }
 
-                logger.info(f"Imported {remote_url} → {repo_path} (bare={bare})")
+                logger.info(f"Imported {remote_url} -> {repo_path} (bare={bare})")
 
             except subprocess.CalledProcessError as e:
                 task_result.update({"error": f"Clone failed: {e.stderr}"})
@@ -3937,7 +3962,7 @@ def process_tasks(tasks):
             old_remote_heads = task.get("previous_remote_heads") or {}
 
             if remote_heads != old_remote_heads:
-                logger.info(f"Remote heads changed for {repo_name} → broadcasting to other devices")
+                logger.info(f"Remote heads changed for {repo_name} -> broadcasting to other devices")
 
                 # Attach to result — this triggers broadcast on Stargit
                 task_result["result"]["broadcast_remote_heads"] = {
@@ -4094,7 +4119,7 @@ def health():
     return jsonify({
         "status": "healthy",
         "service": "StarGit",
-        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "timestamp": datetime.now(timezone.utc).isoformat() + "Z",
         "version": "1.0.0",  # todo: replace with your actual version
         "ports": {
             "backend": int(request.host.split(':')[1]) if ':' in request.host else 5001,
