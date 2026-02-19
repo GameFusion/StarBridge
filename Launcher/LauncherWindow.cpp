@@ -298,7 +298,7 @@ void LauncherWindow::closeEvent(QCloseEvent *event)
 void LauncherWindow::onPlayClicked()
 {
     State = Play;
-    if (runner->getProcess().state() == QProcess::NotRunning) {
+    if (runner->getProcess().state() == QProcess::NotRunning && !runner->isLaunchInProgress()) {
         emit logMessage("Play clicked — starting StarBridge...", false);
         runner->startStarBridge();
 
@@ -306,7 +306,7 @@ void LauncherWindow::onPlayClicked()
         pauseBtn->setEnabled(true);
         stopBtn->setEnabled(true);
     } else {
-        emit logMessage("Play clicked — but already running", false);
+        emit logMessage("Play clicked — but already running or launching", false);
     }
 
     QTimer::singleShot(100, this, &LauncherWindow::checkHealth);
@@ -490,9 +490,12 @@ void LauncherWindow::checkHealth()
         reply->deleteLater();
         manager->deleteLater();
 
-        if(this->State == Play && statusText == "Stopped"){
+        if (this->State == Play &&
+            statusText == "Stopped" &&
+            runner->getProcess().state() == QProcess::NotRunning &&
+            !runner->isLaunchInProgress()) {
             emit logMessage("Relaunching StarBridge service...", false);
-            emit onPlayClicked();
+            onPlayClicked();
         }
     });
 }

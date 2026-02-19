@@ -11,6 +11,7 @@ public:
     explicit ProcessRunner(QObject *parent = nullptr);
     void startStarBridge();
     void stop();
+    bool isLaunchInProgress() const { return launchInProgress; }
 
     QProcess &getProcess(){
         return process;
@@ -34,4 +35,5 @@ private:
     QProcess process;
 
     QString port = "5001";
+    bool launchInProgress = false;
 };

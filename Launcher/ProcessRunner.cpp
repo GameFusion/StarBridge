@@ -26,6 +26,12 @@ ProcessRunner::ProcessRunner(QObject *parent)
 
 void ProcessRunner::startStarBridge()
 {
+    if (launchInProgress) {
+        emit logMessage("Start request ignored — launch already in progress", false);
+        return;
+    }
+    launchInProgress = true;
+
     QString basePath = QDir::currentPath();
 
     // === Read port from .env ===
@@ -68,8 +74,16 @@ void ProcessRunner::startStarBridge()
     });
 
     connect(reply, &QNetworkReply::finished, this, [this, reply, killUrl, manager]() {
-        if (reply->error() == QNetworkReply::NoError) {
-            emit logMessage("StarBridge is running — terminating old instance...", false);
+        const int httpStatus = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+
+        // If endpoint is reachable (even degraded/500), assume an instance is alive and perform controlled restart.
+        if (reply->error() == QNetworkReply::NoError || httpStatus > 0) {
+            emit logMessage(
+                QString("StarBridge reachable on port %1 (HTTP %2) — requesting shutdown before restart")
+                    .arg(port)
+                    .arg(httpStatus > 0 ? QString::number(httpStatus) : "200"),
+                false
+            );
 
             QNetworkAccessManager *killManager = new QNetworkAccessManager(this);
             connect(killManager, &QNetworkAccessManager::sslErrors, [](QNetworkReply *r, const QList<QSslError>&) {
@@ -78,28 +92,40 @@ void ProcessRunner::startStarBridge()
 
             QNetworkRequest killReq(killUrl);
             auto *killReply = killManager->get(killReq);
+            QTimer::singleShot(3000, killReply, [killReply]() { if (!killReply->isFinished()) killReply->abort(); });
 
-            QTimer::singleShot(3000, killReply, [killReply]() { killReply->abort(); });
+            connect(killReply, &QNetworkReply::finished, this, [this, killReply, killManager, manager]() {
+                const int killHttpStatus = killReply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+                const bool killReached = (killReply->error() == QNetworkReply::NoError || killHttpStatus > 0);
 
-            connect(killReply, &QNetworkReply::finished, this, [this, killReply, manager]() {
-                if (killReply->error() == QNetworkReply::NoError) {
-                    emit logMessage("Old instance terminated — waiting for port to free...", false);
-                    waitAndStart(port, manager);  // ← ELITE WAIT LOOP
+                if (killReached) {
+                    emit logMessage("Existing instance acknowledged /kill — waiting for port to free...", false);
+                    waitAndStart(port, manager);
                 } else {
-                    emit logMessage("Could not reach /kill — forcing start", true);
-                    startProcess();
+                    emit logMessage(
+                        QString("Could not shutdown existing instance via /kill: %1 — launch cancelled")
+                            .arg(killReply->errorString()),
+                        true
+                    );
+                    launchInProgress = false;
                 }
-                killReply->deleteLater();
-            });
 
+                killReply->deleteLater();
+                killManager->deleteLater();
+            });
         } else if (reply->error() == QNetworkReply::OperationCanceledError ||
                    reply->error() == QNetworkReply::ConnectionRefusedError ||
                    reply->error() == QNetworkReply::HostNotFoundError) {
             emit logMessage("No running instance — starting fresh", false);
             startProcess();
         } else {
-            emit logMessage(QString("Health check error: %1 — starting anyway").arg(reply->errorString()), true);
-            startProcess();
+            emit logMessage(
+                QString("Health check error: %1 — launch blocked to avoid duplicate bind on %2")
+                    .arg(reply->errorString())
+                    .arg(port),
+                true
+            );
+            launchInProgress = false;
         }
         reply->deleteLater();
     });
@@ -137,8 +163,13 @@ void ProcessRunner::waitAndStart(QString port, QNetworkAccessManager *manager)
                     emit logMessage(QString("Port %1 is free — starting StarBridge").arg(port), false);
                     startProcess();
                 } else {
-                    emit logMessage(QString("Port %1 still busy after %2s — forcing start anyway").arg(port).arg(maxAttempts), true);
-                    startProcess();
+                    emit logMessage(
+                        QString("Port %1 still busy after %2s — launch cancelled to avoid duplicate process")
+                            .arg(port)
+                            .arg(maxAttempts),
+                        true
+                    );
+                    launchInProgress = false;
                 }
             } else {
                 emit logMessage(QString("Waiting for port %1 to free... (%2/%3)").arg(port).arg(attempt).arg(maxAttempts), false);
@@ -198,10 +229,12 @@ void ProcessRunner::startProcess()
 
     if (!process.waitForStarted(5000)) {
         emit logMessage(QString("Failed to start StarBridge: %1").arg(process.errorString()), true);
+        launchInProgress = false;
         return;
     }
 
     emit logMessage("Starting StarBridge...", false);
+    launchInProgress = false;
 
 }
 
@@ -259,6 +292,7 @@ void ProcessRunner::onReadyReadStandardError()
 
 void ProcessRunner::onProcessFinished(int exitCode)
 {
+    launchInProgress = false;
     emit logMessage(QString("Process exited with code %1").arg(exitCode), exitCode != 0);
 }
 
