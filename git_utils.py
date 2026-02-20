@@ -74,7 +74,14 @@ def get_diff(repo_path):
         #print("processing diff for repo", repo_path, flush=True)
         git_command = [GIT_EXECUTABLE, "-C", repo_path, "diff"]
 
-        result = subprocess.run(git_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        result = subprocess.run(
+            git_command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace"
+        )
         if result.returncode != 0:
             #print("NO DIFF", flush=True)
             return {}
@@ -106,44 +113,60 @@ def get_ahead_behind(repo_path, git="git", timeout=10):
     logger.debug(f"[ahead/behind] repo={repo_path}")
 
     try:
-        # STEP 1 — Find current branch (may be detached)
+        # STEP 1 - Find current branch (may be detached)
         r = subprocess.run(
             [git, "-C", repo_path, "symbolic-ref", "--short", "HEAD"],
-            capture_output=True, text=True, timeout=timeout
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout
         )
         if r.returncode != 0:
-            logger.info(f"[ahead/behind] Detached HEAD → return (0,0)")
+            logger.info("[ahead/behind] Detached HEAD -> return (0,0)")
             return 0, 0
 
         branch = r.stdout.strip()
         logger.debug(f"[ahead/behind] branch={branch}")
 
-        # STEP 2 — Try explicit upstream
+        # STEP 2 - Try explicit upstream
         upstream_r = subprocess.run(
             [git, "-C", repo_path, "rev-parse", "--abbrev-ref", f"{branch}@{{u}}"],
-            capture_output=True, text=True, timeout=timeout
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout
         )
 
         if upstream_r.returncode == 0:
             upstream = upstream_r.stdout.strip()
             logger.debug(f"[ahead/behind] upstream={upstream} (explicit)")
         else:
-            logger.info(f"[ahead/behind] No upstream for '{branch}' → falling back")
+            logger.info(f"[ahead/behind] No upstream for '{branch}' -> falling back")
 
-            # STEP 3 — Fallback to origin/<branch>
+            # STEP 3 - Fallback to origin/<branch>
             upstream = f"origin/{branch}"
 
             test = subprocess.run(
                 [git, "-C", repo_path, "rev-parse", "--verify", "--quiet", upstream],
-                capture_output=True, text=True, timeout=timeout
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=timeout
             )
             if test.returncode != 0:
-                logger.info(f"[ahead/behind] '{upstream}' does not exist → scanning remotes")
+                logger.info(f"[ahead/behind] '{upstream}' does not exist -> scanning remotes")
 
-                # STEP 4 — Try ANY remote that has this branch
+                # STEP 4 - Try any remote that has this branch
                 remotes = subprocess.run(
                     [git, "-C", repo_path, "remote"],
-                    capture_output=True, text=True, timeout=timeout
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=timeout
                 ).stdout.split()
 
                 found = False
@@ -151,7 +174,11 @@ def get_ahead_behind(repo_path, git="git", timeout=10):
                     candidate = f"{remote}/{branch}"
                     chk = subprocess.run(
                         [git, "-C", repo_path, "rev-parse", "--verify", "--quiet", candidate],
-                        capture_output=True, text=True, timeout=timeout
+                        capture_output=True,
+                        text=True,
+                        encoding="utf-8",
+                        errors="replace",
+                        timeout=timeout
                     )
                     if chk.returncode == 0:
                         upstream = candidate
@@ -160,31 +187,39 @@ def get_ahead_behind(repo_path, git="git", timeout=10):
                         break
 
                 if not found:
-                    logger.info(f"[ahead/behind] No remote branch found for '{branch}' → (0,0)")
+                    logger.info(f"[ahead/behind] No remote branch found for '{branch}' -> (0,0)")
                     return 0, 0
 
-        # STEP 5 — Fetch only the needed remote
+        # STEP 5 - Fetch only the needed remote
         remote = upstream.split("/")[0]
-        # Safe fetch — never allowed to crash
+        # Safe fetch - never allowed to crash
         try:
             subprocess.run(
                 [git, "-C", repo_path, "fetch", remote, "--quiet", "--no-tags", "--prune"],
-                capture_output=True, text=True, timeout=timeout
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=timeout
             )
             logger.debug(f"[ahead/behind] fetch '{remote}' OK")
         except subprocess.TimeoutExpired:
-            logger.warning(f"[ahead/behind] fetch '{remote}' TIMED OUT → continuing without fetch")
+            logger.warning(f"[ahead/behind] fetch '{remote}' TIMED OUT -> continuing without fetch")
         except Exception as e:
-            logger.warning(f"[ahead/behind] fetch '{remote}' failed ({type(e).__name__}) → {e}")
+            logger.warning(f"[ahead/behind] fetch '{remote}' failed ({type(e).__name__}) -> {e}")
 
-        # STEP 6 — Calculate ahead/behind (final robust step)
+        # STEP 6 - Calculate ahead/behind (final robust step)
         rr = subprocess.run(
             [git, "-C", repo_path, "rev-list", "--left-right", "--count", f"{upstream}...HEAD"],
-            capture_output=True, text=True, timeout=timeout
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout
         )
 
         if rr.returncode != 0:
-            logger.warning(f"[ahead/behind] rev-list failed → return (0,0)")
+            logger.warning("[ahead/behind] rev-list failed -> return (0,0)")
             return 0, 0
 
         behind, ahead = map(int, rr.stdout.strip().split("\t"))
@@ -193,7 +228,6 @@ def get_ahead_behind(repo_path, git="git", timeout=10):
     except Exception as e:
         logger.exception(f"[ahead/behind] Unexpected error: {e}")
         return 0, 0
-    
 
 def get_remote_heads(repo_path, timeout=3):
     """

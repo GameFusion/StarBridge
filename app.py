@@ -2289,7 +2289,15 @@ def compute_commit_delta(repo_path, branch, last_head):
         command = [GIT_EXECUTABLE, "-C", repo_path, "log", f"{last_head}..HEAD", "--date=iso", "--pretty=format:%H|%P|%an|%ae|%ad|%s", branch]
     
     # Run the command
-    result = subprocess.run(command, cwd=repo_path, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    result = subprocess.run(
+        command,
+        cwd=repo_path,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace"
+    )
     
     if result.returncode != 0:
         # Handle no commits (e.g., initial commit or error)
@@ -2382,7 +2390,14 @@ def compute_other_deltas(repo_path, branch, last_head, current_head):
             # Fallback to full HEAD diff if no last_head
             git_command = [GIT_EXECUTABLE, "-C", repo_path, "diff", "HEAD"]
         
-        result = subprocess.run(git_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        result = subprocess.run(
+            git_command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace"
+        )
         
         if result.returncode != 0:
             logger.error("Error running git diff: %s", result.stderr)
