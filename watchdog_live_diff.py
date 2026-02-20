@@ -111,7 +111,7 @@ class LiveDiffWatcher(FileSystemEventHandler):
 
             # FIXED: Only compare if we have sent something before
             if self.last_sent_hash is not None and current_hash == self.last_sent_hash:
-                print(">> >> No diff change — skipping live update")
+                print(">> >> No diff change - skipping live update")
                 return
 
             # Real change OR first time
@@ -119,7 +119,7 @@ class LiveDiffWatcher(FileSystemEventHandler):
             self.last_sent_hash = current_hash
 
             rel_path = Path(event.src_path).relative_to(self.repo_path)
-            logger.info(f"Live diff changed → {self.repo_name}/{rel_path}")
+            logger.info(f"Live diff changed -> {self.repo_name}/{rel_path}")
             print(f">>> LIVE UPDATE SENT: {self.repo_name}/{rel_path}", flush=True)
             self.send_callback(self.repo_path, self.repo_name)
 
@@ -137,7 +137,7 @@ class LiveDiffWatcher(FileSystemEventHandler):
             rel = path.relative_to(self.repo_path) if path.is_relative_to(self.repo_path) else path.name
             logger.info(
                 f"Watchdog: Ignored {self.ignored_count} events in {self.repo_name} "
-                f"(example: {rel} — {reason})"
+                f"(example: {rel} - {reason})"
             )
             self.last_reported = self.ignored_count
 

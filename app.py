@@ -88,6 +88,32 @@ CERT_PATH = settings.get("ssl.cert_path", "certs/cert.pem")      # dot notation
 KEY_PATH = settings.get("ssl.key_path", "certs/key.pem")
 REPO_BASE = settings.get('repo_base') # REPO_BASE needs to explicitly be defined in settings to allow starbridge to create new repositories in poll mode
 
+def refresh_runtime_settings():
+    """
+    Reload settings.json at runtime so new repositories/config updates
+    are picked up without restarting StarBridge.
+    """
+    global GIT_EXECUTABLE, REPOSITORIES, REPO_BASE
+
+    settings.reload()
+
+    configured_git = settings.get("git_executable", "git")
+    resolved_git = None
+    if configured_git:
+        if os.path.isabs(configured_git) and os.path.exists(configured_git):
+            resolved_git = configured_git
+        else:
+            resolved_git = shutil.which(configured_git)
+    if not resolved_git:
+        resolved_git = shutil.which("git") or "git"
+
+    GIT_EXECUTABLE = resolved_git
+    # Keep git_utils in sync with runtime git selection.
+    git_utils.GIT_EXECUTABLE = resolved_git
+
+    REPOSITORIES = settings.get("repositories", []) or []
+    REPO_BASE = settings.get("repo_base")
+
 STARGIT_API_KEY = os.getenv('STARGIT_API_KEY', '')
 STARGIT_API_URL = os.getenv('STARGIT_API_URL', 'https://stargit.com')
 STARBRIDGE_PORT = os.getenv('STARBRIDGE_PORT', 5001)
@@ -2492,6 +2518,7 @@ def send_update(deltas, mode, access_token, headers, base_payload):
 # Send heartbeat to stargit.com
 def send_heartbeat_to_stargit(batch_mode=False):
     logger.debug(">>>>>>>>>> Sending heartbeat to stargit.com")
+    refresh_runtime_settings()
     if not STARGIT_API_KEY:
         logger.info("Stargit registration disabled in .env")
         return
@@ -2540,22 +2567,26 @@ def send_heartbeat_to_stargit(batch_mode=False):
     for repo_path in REPOSITORIES:
         repo_name = os.path.basename(repo_path)
         logger.info(f">>>>>>>>>> Heartbeat -> Processing repository: {repo_name}")
-
-        # === 1. Collect summary for THIS repo only ===
-        repo_name_out, summary = collect_and_send_repo_summary(repo_path)
-        if repo_name_out != repo_name:
-            logger.warning(f"Repo name mismatch: expected {repo_name}, got {repo_name_out}")
-            failed_repos.append(repo_name)
-            continue
-
-        # === 2. Send PROBE for THIS repo only ===
-        probe_payload = {
-            **base_payload,
-            "mode": "probe",
-            "repo_summaries": {repo_name: summary}  # send single repo update
-        }
-
         try:
+            if not os.path.isdir(repo_path):
+                logger.warning("[%s] Repository path is invalid or missing: %s", repo_name, repo_path)
+                failed_repos.append(repo_name)
+                continue
+
+            # === 1. Collect summary for THIS repo only ===
+            repo_name_out, summary = collect_and_send_repo_summary(repo_path)
+            if repo_name_out != repo_name:
+                logger.warning(f"Repo name mismatch: expected {repo_name}, got {repo_name_out}")
+                failed_repos.append(repo_name)
+                continue
+
+            # === 2. Send PROBE for THIS repo only ===
+            probe_payload = {
+                **base_payload,
+                "mode": "probe",
+                "repo_summaries": {repo_name: summary}  # send single repo update
+            }
+
             response = post_with_retry(HEARTBEAT_ENDPOINT, probe_payload, headers, timeout=15)
             if response.status_code == 401:
                 response = refresh_token_and_retry(access_token, post_with_retry,
@@ -4088,6 +4119,7 @@ def poll_for_tasks(results=None):
         return []
 
 def pull_tasks():
+    refresh_runtime_settings()
     tasks = poll_for_tasks()
     if tasks:
         results = process_tasks(tasks)
