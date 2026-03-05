@@ -12,11 +12,13 @@
 #include <QNetworkReply>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QIcon>
 
 LauncherWindow::LauncherWindow(QWidget *parent)
     : QMainWindow(parent)
 {
     setWindowTitle("StarBridge Launcher");
+    setWindowIcon(QIcon(":/resources/StarBridge.png"));
     resize(900, 700);
 
     // In LauncherWindow constructor — after creating central widget

@@ -1,4 +1,5 @@
 #include <QApplication>
+#include <QIcon>
 #include <QSplashScreen>
 #include <QTimer>
 #include "LauncherWindow.h"
@@ -9,6 +10,7 @@ int main(int argc, char *argv[])
     app.setApplicationName("StarBridge");
     app.setApplicationVersion("1.0");
     app.setOrganizationName("StarGit Studio");
+    app.setWindowIcon(QIcon(":/resources/StarBridge.png"));
 
     // === ELITE SPLASH SCREEN ===
     QPixmap splashPixmap(":/resources/splash.png");
@@ -18,6 +20,7 @@ int main(int argc, char *argv[])
 
     // === MAIN WINDOW ===
     LauncherWindow window;
+    window.setWindowIcon(QIcon(":/resources/StarBridge.png"));
     window.show();
 
     // Close splash after 2 seconds

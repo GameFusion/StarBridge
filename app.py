@@ -324,7 +324,16 @@ def get_branches_data(repo_path):
     try:
         # Local branches
         local_branches = run_git_command(repo_path, [GIT_EXECUTABLE, "-C", repo_path, "branch", "--format", "%(refname:short)"])
-        local_branches_info = [{"name": b.strip()} for b in local_branches.splitlines() if b.strip()]
+        local_branches_info = []
+        for b in local_branches.splitlines():
+            name = b.strip()
+            if not name:
+                continue
+            # Detached HEAD appears as a pseudo-branch like "(HEAD detached from ...)".
+            # It is not a real ref and fails rev-parse/sync logic.
+            if name.startswith("(") and "detached" in name.lower():
+                continue
+            local_branches_info.append({"name": name})
 
         # Remote branches
         remote_branches = run_git_command(repo_path, [GIT_EXECUTABLE, "-C", repo_path, "branch", "-r", "--format", "%(refname:short)"])
@@ -2182,6 +2191,9 @@ def collect_repo_details():
 
 def safe_rev_parse(repo_path, ref):
     """Safely resolve a ref, even during rebase or detached HEAD"""
+    # Detached pseudo-branch strings (e.g. "(HEAD detached from abc123)") are not valid refs.
+    if not ref or (ref.startswith("(") and "detached" in ref.lower()):
+        return None
     result = run_git_command(repo_path, [GIT_EXECUTABLE, "-C", repo_path, "rev-parse", "--verify", ref])
     if result.startswith("Error:") or not result.strip():
         # Fallback: try to resolve via HEAD if ref is current
