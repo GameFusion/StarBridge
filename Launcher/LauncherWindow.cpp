@@ -1,4 +1,5 @@
 #include "LauncherWindow.h"
+#include <QHBoxLayout>
 #include <QVBoxLayout>
 #include <QPushButton>
 #include <QApplication>
@@ -12,7 +13,12 @@
 #include <QNetworkReply>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QJsonArray>
 #include <QIcon>
+#include <QFile>
+#include <QFileInfo>
+#include <QDir>
+#include <QSignalBlocker>
 
 LauncherWindow::LauncherWindow(QWidget *parent)
     : QMainWindow(parent)
@@ -97,6 +103,57 @@ border-radius: 5px;
     //setCentralWidget(central);
     auto *layout = new QVBoxLayout(central);
 
+    // Font Awesome
+    int fontId = QFontDatabase::addApplicationFont(":/resources/fa-solid-900.ttf");
+    if (fontId != -1) {
+        QStringList fontFamilies = QFontDatabase::applicationFontFamilies(fontId);
+        if (!fontFamilies.isEmpty()) {
+            qDebug() << "Font Awesome Solid loaded:" << fontFamilies;
+        }
+    }
+
+    QFont fa = QFont("Font Awesome 5 Free", 40);
+
+    // Repository filter (overlay)
+    filterBtn = new QToolButton(central);
+    filterBtn->setToolTip("Filter repositories");
+    filterBtn->setPopupMode(QToolButton::InstantPopup);
+    filterBtn->setAutoRaise(true);
+    filterBtn->setText(QChar(0xf0b0)); // fa-filter
+    filterBtn->setFont(QFont("Font Awesome 5 Free", 11));
+    filterBtn->setFixedSize(30, 20);
+    filterBtn->setStyleSheet(
+        "QToolButton { color:#8b949e; border:none; padding-left:1px; padding-right:12px; }"
+        "QToolButton:hover { color:#e6edf3; }"
+        "QToolButton::menu-indicator { subcontrol-origin: padding; subcontrol-position: right center; }"
+    );
+
+    filterMenu = new QMenu(this);
+    allReposAction = new QAction("All repositories", this);
+    allReposAction->setCheckable(true);
+    allReposAction->setChecked(true);
+    filterMenu->addAction(allReposAction);
+
+    loadRepositoryFilters();
+    if (!repositoryNames.isEmpty()) {
+        filterMenu->addSeparator();
+    }
+    for (const QString &repoName : repositoryNames) {
+        QAction *repoAction = new QAction(repoName, this);
+        repoAction->setCheckable(true);
+        repoAction->setChecked(true);
+        filterMenu->addAction(repoAction);
+        repoFilterActions.append(repoAction);
+    }
+
+    connect(filterMenu, &QMenu::triggered, this, &LauncherWindow::onFilterActionTriggered);
+    filterBtn->setMenu(filterMenu);
+
+    if (repositoryNames.isEmpty()) {
+        filterBtn->setEnabled(false);
+        filterBtn->setToolTip("No repositories found in settings.json");
+    }
+
     // Title
     //auto *title = new QLabel("<h1 style='color:#00d4ff;'>StarBridge</h1><p>Running...</p>");
     statusLabel = new QLabel("<h1 style='color:#00d4ff;'>StarBridge</h1><p>Checking...</p>");
@@ -121,23 +178,12 @@ border-radius: 5px;
         }
     )");
     layout->addWidget(logView);
+    QTimer::singleShot(0, this, [this]() { positionFilterOverlay(); });
 
     // Play controller
     QHBoxLayout *controlLayout = new QHBoxLayout();
     controlLayout->setSpacing(12);
     controlLayout->setContentsMargins(20, 10, 20, 20);
-
-    // font awesome
-    int fontId = QFontDatabase::addApplicationFont(":/resources/fa-solid-900.ttf");
-    if (fontId != -1) {
-        QStringList fontFamilies = QFontDatabase::applicationFontFamilies(fontId);
-        if (!fontFamilies.isEmpty()) {
-            qDebug() << "Font Awesome Solid loaded:" << fontFamilies;
-        }
-    }
-
-    QFont fa = QFont("Font Awesome 5 Free", 40);
-
 
     // Hover/press animation ===
     QString baseStyle = R"(
@@ -296,6 +342,32 @@ void LauncherWindow::closeEvent(QCloseEvent *event)
     //event->accept();
 }
 
+void LauncherWindow::resizeEvent(QResizeEvent *event)
+{
+    QMainWindow::resizeEvent(event);
+    positionFilterOverlay();
+}
+
+void LauncherWindow::positionFilterOverlay()
+{
+    if (!filterBtn || !logView) {
+        return;
+    }
+
+    const QRect logRect = logView->geometry();
+    const int rightPadding = 8;
+    const int gapAboveLog = 2;
+
+    int x = logRect.right() - filterBtn->width() - rightPadding;
+    int y = logRect.top() - filterBtn->height() - gapAboveLog;
+
+    x = qMax(0, x);
+    y = qMax(0, y);
+
+    filterBtn->move(x, y);
+    filterBtn->raise();
+}
+
 
 void LauncherWindow::onPlayClicked()
 {
@@ -361,63 +433,182 @@ void LauncherWindow::onProcessStateChanged(QProcess::ProcessState state)
     }
 }
 
-// In your logMessage handler — ELITE VERSION
-void LauncherWindow::logMessage(const QString &rawText, bool isError)
+void LauncherWindow::loadRepositoryFilters()
+{
+    repositoryNames.clear();
+    enabledRepositories.clear();
+
+    QFile file(QDir::currentPath() + "/settings.json");
+    if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        return;
+    }
+
+    const QJsonDocument doc = QJsonDocument::fromJson(file.readAll());
+    if (!doc.isObject()) {
+        return;
+    }
+
+    const QJsonArray repos = doc.object().value("repositories").toArray();
+    QSet<QString> seen;
+    for (const QJsonValue &v : repos) {
+        if (!v.isString()) {
+            continue;
+        }
+
+        const QString repoPath = v.toString().trimmed();
+        if (repoPath.isEmpty()) {
+            continue;
+        }
+
+        QString repoName = QFileInfo(repoPath).fileName();
+        if (repoName.isEmpty()) {
+            repoName = repoPath;
+        }
+        if (!seen.contains(repoName)) {
+            seen.insert(repoName);
+            repositoryNames.append(repoName);
+        }
+    }
+
+    repositoryNames.sort(Qt::CaseInsensitive);
+    for (const QString &repoName : repositoryNames) {
+        enabledRepositories.insert(repoName);
+    }
+}
+
+bool LauncherWindow::shouldDisplayLogMessage(const QString &rawText) const
+{
+    if (!allReposAction || allReposAction->isChecked() || repositoryNames.isEmpty()) {
+        return true;
+    }
+
+    bool mentionsAnyRepo = false;
+    for (const QString &repoName : repositoryNames) {
+        if (rawText.contains(repoName, Qt::CaseInsensitive)) {
+            mentionsAnyRepo = true;
+            if (enabledRepositories.contains(repoName)) {
+                return true;
+            }
+        }
+    }
+
+    // Keep global/system logs visible even when repo filter is active.
+    return !mentionsAnyRepo;
+}
+
+QString LauncherWindow::formatLogMessageHtml(const QString &rawText, bool isError) const
 {
     QString text = rawText;
 
-    // === 1. ESCAPE ALL HTML — THIS IS THE KEY ===
     text = text.toHtmlEscaped();
 
-    // === 2. SAFE DIFF HIGHLIGHTING (using <span> with inline style) ===
     text = text
-               // Hunk headers
                .replace(QRegularExpression(R"(^(@@ .*? @@.*)$)"),
                         R"(<span style="color:#79c0ff; font-weight:bold;">\1</span>)")
-               // Added lines
                .replace(QRegularExpression(R"(^\+.*$)"),
                         R"(<span style="color:#56d364; background:rgba(86,211,100,0.15);">\0</span>)")
-               // Removed lines
                .replace(QRegularExpression(R"(^\-.*$)"),
                         R"(<span style="color:#f85149; background:rgba(248,81,73,0.15);">\0</span>)")
-               // Context lines
                .replace(QRegularExpression(R"(^ .*$)"),
                         R"(<span style="color:#8b949e;">\0</span>)")
-               // File headers
                .replace(QRegularExpression(R"(^diff --git.*$)"),
                         R"(<span style="color:#8b949e; font-weight:bold;">\0</span>)")
                .replace(QRegularExpression(R"(^index .*$)"),
                         R"(<span style="color:#8b949e;">\0</span>)");
 
-    // === 3. PRESERVE LINE BREAKS ===
     text = text.replace("\n", "<br>");
 
-    // === 4. APPLY LOG LEVEL COLOR ===
     QString color = isError ? "#ff6b6b" : "#e6edf3";
     if (text.contains("ERROR", Qt::CaseInsensitive)) color = "#ff6b6b";
     else if (text.contains("WARNING", Qt::CaseInsensitive)) color = "#ffa657";
     else if (text.contains("INFO", Qt::CaseInsensitive)) color = "#79c0ff";
     else if (text.contains("DEBUG", Qt::CaseInsensitive)) color = "#8b949e";
 
-    // === 5. INSERT WITH SAFE STYLING ===
-    logView->append(QString("<span style='color:%1; font-family:Menlo,monospace;'>%2</span>")
-                        .arg(color, text));
+    return QString("<span style='color:%1; font-family:Menlo,monospace;'>%2</span>")
+        .arg(color, text);
+}
 
-    // === MAX HISTORY ENFORCEMENT ===
-    QTextDocument *doc = logView->document();
-    int blockCount = doc->blockCount();
+void LauncherWindow::refreshLogView()
+{
+    logView->clear();
+    for (const auto &entry : logEntries) {
+        if (shouldDisplayLogMessage(entry.first)) {
+            logView->append(formatLogMessageHtml(entry.first, entry.second));
+        }
+    }
 
-    QTextCursor cursor = logView->textCursor();
-    cursor.movePosition(QTextCursor::Start);
-
-    if (blockCount > maxLogLines) {
-        cursor.movePosition(QTextCursor::Down, QTextCursor::KeepAnchor, blockCount - trimLogLines);
-        cursor.removeSelectedText();
-        cursor.deleteChar(); // remove extra newline
+    if (autoFollow) {
+        logView->verticalScrollBar()->setValue(logView->verticalScrollBar()->maximum());
     }
 }
 
+void LauncherWindow::onFilterActionTriggered(QAction *action)
+{
+    if (!action) {
+        return;
+    }
 
+    QSignalBlocker blocker(filterMenu);
+
+    if (action == allReposAction) {
+        if (!allReposAction->isChecked()) {
+            allReposAction->setChecked(true);
+            return;
+        }
+        enabledRepositories.clear();
+        for (QAction *repoAction : repoFilterActions) {
+            repoAction->setChecked(true);
+            enabledRepositories.insert(repoAction->text());
+        }
+    } else {
+        enabledRepositories.clear();
+        int checkedCount = 0;
+        for (QAction *repoAction : repoFilterActions) {
+            if (repoAction->isChecked()) {
+                ++checkedCount;
+                enabledRepositories.insert(repoAction->text());
+            }
+        }
+
+        if (!repoFilterActions.isEmpty() && checkedCount == repoFilterActions.size()) {
+            allReposAction->setChecked(true);
+        } else {
+            allReposAction->setChecked(false);
+        }
+
+        if (!repoFilterActions.isEmpty() && checkedCount == 0) {
+            allReposAction->setChecked(true);
+            enabledRepositories.clear();
+            for (QAction *repoAction : repoFilterActions) {
+                repoAction->setChecked(true);
+                enabledRepositories.insert(repoAction->text());
+            }
+        }
+    }
+
+    refreshLogView();
+}
+
+void LauncherWindow::logMessage(const QString &rawText, bool isError)
+{
+    logEntries.append(qMakePair(rawText, isError));
+
+    // Keep history bounded and refresh if old entries are trimmed.
+    if (logEntries.size() > maxLogLines) {
+        while (logEntries.size() > trimLogLines) {
+            logEntries.removeFirst();
+        }
+        refreshLogView();
+        return;
+    }
+
+    if (shouldDisplayLogMessage(rawText)) {
+        logView->append(formatLogMessageHtml(rawText, isError));
+        if (autoFollow) {
+            logView->verticalScrollBar()->setValue(logView->verticalScrollBar()->maximum());
+        }
+    }
+}
 
 // Show window from tray
 void LauncherWindow::onShowWindow()
@@ -517,3 +708,4 @@ void LauncherWindow::updateStatus(const QString &text, const QString &color)
 
     statusLabel->setText(html);
 }
+
