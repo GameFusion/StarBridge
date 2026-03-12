@@ -17,12 +17,15 @@
         <ul class="list-group mb-4">
         {% for repo in repos %}
             <li class="list-group-item bg-dark text-success d-flex justify-content-between align-items-center border-success" style="margin: 0 !important;">
-                {{ repo }}
-                <form method="POST" class="m-0">
-                    <input type="hidden" name="action" value="remove">
-                    <input type="hidden" name="repo" value="{{ repo }}">
-                    <button class="btn btn-sm btn-success" type="submit">Remove</button>
-                </form>
+                <span>{{ repo }}</span>
+                <div class="d-flex gap-2">
+                    <a class="btn btn-sm btn-outline-success" href="/repository?repo_path={{ repo|urlencode }}">Open</a>
+                    <form method="POST" class="m-0">
+                        <input type="hidden" name="action" value="remove">
+                        <input type="hidden" name="repo" value="{{ repo }}">
+                        <button class="btn btn-sm btn-success" type="submit">Remove</button>
+                    </form>
+                </div>
             </li>
         {% else %}
             <li class="list-group-item bg-dark text-success border-success">No repositories added yet.</li>

@@ -5,8 +5,10 @@
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QNetworkRequest>
+#include <QEventLoop>
 #include <QTextStream>
 #include <QTimer>
+#include <QUrl>
 
 ProcessRunner::ProcessRunner(QObject *parent)
     : QObject(parent)
@@ -43,7 +45,8 @@ void ProcessRunner::startStarBridge()
             if (line.startsWith("STARBRIDGE_PORT=")) {
                 port = line.mid(16).trimmed();
                 emit logMessage("Using port from .env: " + port, false);
-                break;
+            } else if (line.startsWith("ADMIN_PORT=")) {
+                adminPort = line.mid(11).trimmed();
             }
         }
         envFile.close();
@@ -298,10 +301,69 @@ void ProcessRunner::onProcessFinished(int exitCode)
 
 void ProcessRunner::stop()
 {
+    // Try graceful shutdown of backend + frontend first.
+    sendShutdownRequest(
+        {
+            QString("https://127.0.0.1:%1/kill").arg(port),
+            QString("http://127.0.0.1:%1/kill").arg(port)
+        },
+        2000
+    );
+
+    sendShutdownRequest(
+        {
+            QString("http://127.0.0.1:%1/shutdown").arg(adminPort),
+            QString("https://127.0.0.1:%1/shutdown").arg(adminPort)
+        },
+        1500
+    );
+
     if (process.state() == QProcess::Running) {
         process.terminate();
         if (!process.waitForFinished(3000)) {
             process.kill();
+            process.waitForFinished(1000);
         }
     }
+}
+
+bool ProcessRunner::sendShutdownRequest(const QStringList &urls, int timeoutMs)
+{
+    for (const QString &urlString : urls) {
+        QNetworkAccessManager manager;
+        connect(&manager, &QNetworkAccessManager::sslErrors,
+                [](QNetworkReply *reply, const QList<QSslError>&) {
+                    reply->ignoreSslErrors();
+                });
+
+        QNetworkRequest request{QUrl(urlString)};
+        QNetworkReply *reply = manager.get(request);
+
+        QEventLoop loop;
+        QTimer timer;
+        timer.setSingleShot(true);
+
+        connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
+        connect(&timer, &QTimer::timeout, &loop, &QEventLoop::quit);
+
+        timer.start(timeoutMs);
+        loop.exec();
+
+        if (!reply->isFinished()) {
+            reply->abort();
+        }
+
+        const int httpStatus = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        const bool reached = (reply->error() == QNetworkReply::NoError || httpStatus > 0);
+
+        if (reached) {
+            emit logMessage(QString("Shutdown endpoint reached: %1").arg(urlString), false);
+            reply->deleteLater();
+            return true;
+        }
+
+        reply->deleteLater();
+    }
+
+    return false;
 }

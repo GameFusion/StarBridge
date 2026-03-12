@@ -1,6 +1,7 @@
 #pragma once
 #include <QObject>
 #include <QProcess>
+#include <QStringList>
 
 class QNetworkAccessManager;
 
@@ -31,9 +32,11 @@ private:
     void handleOutput(const QString &output);
     void waitAndStart(QString port, QNetworkAccessManager *manager);
     void startProcess();
+    bool sendShutdownRequest(const QStringList &urls, int timeoutMs = 2000);
 
     QProcess process;
 
     QString port = "5001";
+    QString adminPort = "5002";
     bool launchInProgress = false;
 };

@@ -468,7 +468,7 @@ def rev_walk():
     check_api_key()  # Your function to verify the API key
     data = request.json
     branch = data.get('branch')
-    path = data.get('repo_path')
+    repo_path = data.get('repo_path')
     mod = data.get('mod', None)  # Optional
     logger.debug("Processing revwalk for repo_path: %s, branch: %s", path, branch)
     
@@ -546,17 +546,17 @@ def diff():
         logger.warning("Repository path is required")
         return jsonify({"error": "Repository path is required"}), 400
 
-    if path not in REPOSITORIES:
+    if repo_path not in REPOSITORIES:
         logger.warning("Repository path '%s' not found in registered repositories", repo_path)
-        return jsonify({"error": f"Repository path '{path}' not found in registered repositories"}), 400
+        return jsonify({"error": f"Repository path '{repo_path}' not found in registered repositories"}), 400
 
     try:
-        if not os.path.isdir(path):
-            logger.error("Repository path '%s' does not exist", path)
-            raise Exception(f"Repository path {path} does not exist")
+        if not os.path.isdir(repo_path):
+            logger.error("Repository path '%s' does not exist", repo_path)
+            raise Exception(f"Repository path {repo_path} does not exist")
 
         # Prepare the git command to get the diff
-        git_command = [GIT_EXECUTABLE, "-C", path, "diff"]
+        git_command = [GIT_EXECUTABLE, "-C", repo_path, "diff"]
 
         if commit1 and commit2:
             # Get diff between two commits
@@ -591,7 +591,7 @@ def diff():
         if commit:
             # Get the commit details (message, author, email, date, and parents)
             commit_details_command = [
-                GIT_EXECUTABLE, "-C", path, "show", "--no-patch", "--format=%B%n%an%n%ae%n%ad%n%P", commit
+                GIT_EXECUTABLE, "-C", repo_path, "show", "--no-patch", "--format=%B%n%an%n%ae%n%ad%n%P", commit
             ]
             result_message = subprocess.run(commit_details_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
