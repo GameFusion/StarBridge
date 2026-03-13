@@ -644,8 +644,13 @@ def push():
     repo_path = data.get('repo_path')
     branch = data.get('branch', 'master')  # Default to 'main' if branch is not specified
     remote = data.get('remote', 'origin') # Default to 'origin' if remote is not specified
+    force = data.get('force', False)
+    if isinstance(force, str):
+        force = force.strip().lower() in ('1', 'true', 'on', 'yes')
+    else:
+        force = bool(force)
 
-    logger.debug("Pushing to data: %s, branch: %s, remote: %s", data, branch, remote)
+    logger.debug("Pushing to data: %s, branch: %s, remote: %s, force: %s", data, branch, remote, force)
 
     if repo_path not in REPOSITORIES:
         logger.error("Repository path '%s' not found in registered repositories", repo_path)
@@ -653,7 +658,11 @@ def push():
 
     try:
         # Prepare the git push command
-        git_push_command = [GIT_EXECUTABLE, "-C", repo_path, "push", remote, branch]
+        git_push_command = [GIT_EXECUTABLE, "-C", repo_path, "push"]
+        if force:
+            # Safer than --force, protects against overwriting unseen remote updates.
+            git_push_command.append("--force-with-lease")
+        git_push_command.extend([remote, branch])
 
         # Run the git push command
         result = subprocess.run(git_push_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -665,7 +674,9 @@ def push():
         # Return success response
         return jsonify({
             "status": "Push successful",
-            "branch": branch
+            "branch": branch,
+            "remote": remote,
+            "force": force
         }), 200
 
     except Exception as e:

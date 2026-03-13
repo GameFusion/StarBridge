@@ -227,6 +227,7 @@ def repository_page():
     selected_remote = request.values.get('remote', 'origin').strip() or "origin"
     selected_branch = request.values.get('branch', '').strip()
     pull_mode = request.values.get('pull_mode', 'ff-only').strip() or "ff-only"
+    force_push = (request.values.get('force_push', '').strip().lower() in ('1', 'true', 'on', 'yes'))
 
     action_message = None
     action_error = None
@@ -257,13 +258,14 @@ def repository_page():
             payload = {
                 "repo_path": selected_repo,
                 "remote": selected_remote,
-                "branch": branch_for_push
+                "branch": branch_for_push,
+                "force": force_push
             }
             response_data, request_error = backend_request('/api/push', payload=payload, method='POST')
             if request_error:
                 action_error = f"Push failed: {request_error}"
             else:
-                action_message = "Push completed."
+                action_message = "Force push completed." if force_push else "Push completed."
                 action_output = (response_data or {}).get("status")
 
         elif action == "refresh":
@@ -334,6 +336,7 @@ def repository_page():
         selected_remote=selected_remote,
         selected_branch=selected_branch,
         pull_mode=pull_mode,
+        force_push=force_push,
         remote_names=remote_names,
         branch_names=branch_names,
         action_message=action_message,
