@@ -3004,7 +3004,15 @@ def process_tasks(tasks):
         if action == "create_repo" or action == "import_repo" or action == "update_starbridge":
             repo_path = None
         else:
-            repo_path = find_repo_path_by_name(repo_name)
+            if action in ('pr_compare', 'pr_merge'):
+                from pr_git import registered_repository, GitReviewError
+                try:
+                    repo_path = registered_repository(REPOSITORIES, repo_name, params.get('repo_path'))
+                except GitReviewError as exc:
+                    results.append({'task_id': task['id'], 'result': None, 'error': str(exc)})
+                    continue
+            else:
+                repo_path = find_repo_path_by_name(repo_name)
 
             if not repo_path:
                 logger.warning(f"Repo {repo_name} not found")
@@ -3020,7 +3028,19 @@ def process_tasks(tasks):
         if action in HEADS_CHANGING_ACTIONS:
             task["previous_remote_heads"] = git_utils.get_remote_heads(repo_path) or {}
 
-        if action == 'get_file':
+        if action in ('pr_compare', 'pr_merge'):
+            from pr_git import compare as pr_compare, merge as pr_merge, GitReviewError
+            try:
+                if action == 'pr_compare':
+                    task_result['result'] = {'pr_snapshot': pr_compare(repo_path, params.get('base'), params.get('head'), params.get('included'))}
+                else:
+                    if os.environ.get('STARGIT_PR_MERGE_ENABLED', 'false').lower() != 'true':
+                        raise GitReviewError('Native PR merging is not enabled on this StarBridge')
+                    keys = ('base', 'head', 'expected_base', 'expected_head', 'operation', 'actor')
+                    task_result['result'] = {'pr_merge': pr_merge(repo_path, **{key: params.get(key) for key in keys})}
+            except Exception as exc:
+                task_result['error'] = str(exc)
+        elif action == 'get_file':
             file_path = params.get('file_path')
             commit_sha = params.get('commit_sha', 'HEAD')
             logger.debug(f"get_file params: repo={repo_name}, path={file_path}, sha={commit_sha}")
