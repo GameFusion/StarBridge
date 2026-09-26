@@ -36,18 +36,24 @@ def git(path, *args, input=None, allowed=(0,)):
 
 
 def registered_repository(paths, name, expected_path):
-    """Resolve only a registered worker repository with the expected path/name."""
-    if not isinstance(expected_path, str) or not os.path.isabs(expected_path):
-        raise GitReviewError("Repository registration needs a current absolute path")
-    expected = os.path.realpath(expected_path)
+    """Resolve a registered worker repository, rejecting ambiguous legacy names."""
     candidates = {
         os.path.realpath(path)
         for path in paths
         if os.path.basename(os.path.normpath(path)) == name
-        and os.path.realpath(path) == expected
     }
+    if expected_path is not None:
+        if not isinstance(expected_path, str) or not os.path.isabs(expected_path):
+            raise GitReviewError(
+                "Repository registration needs a current absolute path"
+            )
+        candidates &= {os.path.realpath(expected_path)}
+    # Older heartbeat records have no path. A unique registered name on the
+    # authenticated server is sufficient; never choose the first duplicate.
     if len(candidates) != 1:
-        raise GitReviewError("Repository registration does not match this worker")
+        raise GitReviewError(
+            "Repository registration is missing or ambiguous on this worker"
+        )
     return candidates.pop()
 
 
