@@ -1996,59 +1996,15 @@ def get_access_token():
 
 import concurrent.futures
 
-def get_file_list(repo_path):
-    """Get a list of committed files with metadata: name, latest_sha, size."""
-    # Single command for all files: mode type blob_sha size path
-    command = [GIT_EXECUTABLE, "-C", repo_path, "ls-tree", "-r", "-l", "HEAD"]
-    output = run_git_command(repo_path, command)
-    if output.startswith("Error:"):
-        logger.warning("Failed to get file list for repo %s", repo_path)
-        return [], 0
-    
-    file_info = []
-    total_size = 0
-    for line in output.splitlines():
-        if not line.strip():
-            continue
-        parts = line.split(maxsplit=4)  # mode, type, blob_sha, size, path (handle spaces in paths)
-        if len(parts) == 5:
-            mode, obj_type, blob_sha, size_str, file_path = parts
-            if obj_type == 'blob':  # Only files, skip trees
-                file_size = int(size_str) if size_str.isdigit() else 0
-                total_size += file_size
-                file_info.append({
-                    "name": file_path.strip(),
-                    "blob_sha": blob_sha,  # Not latest commit SHA, but blob SHA (if needed)
-                    "size": file_size
-                })
-    
-    # Parallelize latest commit SHA per file
-    def get_latest_sha(file_path):
-        command_sha = [GIT_EXECUTABLE, "-C", repo_path, "log", "-1", "--format=%H", "--", file_path]
-        latest_sha = run_git_command(repo_path, command_sha)
-        return latest_sha if not latest_sha.startswith("Error:") else None
-    
-    file_paths = [f["name"] for f in file_info]
-    with concurrent.futures.ThreadPoolExecutor() as executor:
-        shas = list(executor.map(get_latest_sha, file_paths))
-    
-    for info, sha in zip(file_info, shas):
-        info["latest_sha"] = sha
-    
-    return file_info, total_size
+def get_file_list(repo_path, ref='HEAD'):
+    from repository_snapshot import file_snapshot
+    return file_snapshot(repo_path, ref)
 
-def get_readme_text(repo_path):
-    """Read and serialize README.md text if it exists."""
-    readme_path = os.path.join(repo_path, "README.md")
-    if os.path.exists(readme_path):
-        try:
-            with open(readme_path, 'r', encoding='utf-8') as f:
-                return f.read()
-        except Exception as e:
-            logger.error("Error reading README.md in %s: %s", repo_path, str(e))
-            return ""
-    #logger.debug("No README.md found in %s", repo_path)
-    return ""
+
+def get_readme_text(repo_path, ref='HEAD'):
+    from repository_snapshot import readme_snapshot
+    return readme_snapshot(repo_path, ref)
+
 
 def full_sync(repo_path: str, repo_name: str = None) -> dict:
     """
