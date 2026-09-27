@@ -22,6 +22,8 @@ def file_snapshot(path, ref='HEAD'):
         total += size
         files.append(dict(name=name.decode('utf-8', 'replace'), blob_sha=blob.decode(),
                           size=size, latest_sha=sha, last_change_unknown=True))
+    from repository_history import annotate_files
+    annotate_files(path, sha, files)
     return files, total
 
 

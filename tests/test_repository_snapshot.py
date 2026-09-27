@@ -18,7 +18,7 @@ class SnapshotTests(unittest.TestCase):
             files,size=file_snapshot(bare,'main')
             self.assertEqual({f['name'] for f in files},{'README.md','a tab\tand newline\n.txt'})
             self.assertEqual(size,len('Main branch readme')+len('literal path'))
-            self.assertTrue(all(f['last_change_unknown'] for f in files))
+            self.assertTrue(all(f['last_change']['message'] == 'Initial' for f in files))
             self.assertEqual(files[0]['latest_sha'],git('-C',bare,'rev-parse','main'))
             self.assertEqual(readme_snapshot(bare,'main'),'Main branch readme')
             self.assertEqual(readme_snapshot(bare,'feature'),'Feature readme')

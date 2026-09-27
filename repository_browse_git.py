@@ -27,6 +27,8 @@ def branch_snapshot(path, branch):
         size += length
         files.append(dict(name=name.decode('utf-8', 'replace'), size=length,
                           blob_sha=blob.decode(), latest_sha=sha, last_change_unknown=True))
+    from repository_history import annotate_files
+    directory_changes = annotate_files(path, sha, files)
     readme_name = next((f['name'] for f in files if f['name'].lower() in
                        ('readme.md', 'readme.markdown', 'readme') and f['size'] <= 500000), None)
     readme = git(path, 'show', sha + ':' + readme_name).decode('utf-8', 'replace') if readme_name else ''
@@ -39,4 +41,4 @@ def branch_snapshot(path, branch):
             commits.append(dict(sha=h, author_name=author, author_email=email,
                                 date=date, parents=parents.split(), message=message))
     return dict(branch=branch, sha=sha, files=files, readme=readme, commits=commits,
-                storage_size=size)
+                storage_size=size, directory_changes=directory_changes, metadata_version=2)
