@@ -1130,27 +1130,13 @@ def get_current_branch_or_default(repo_path):
     Returns the current branch name if the repository has commits.
     Otherwise, returns the default branch name to be used after the first commit.
     """
-    logger.debug("Getting current branch or default for repo_path: %s", repo_path)
-    # First, check if there are any commits in the repository
-    log_output = run_git_command(repo_path, [GIT_EXECUTABLE, "log", "-1"])  # This will throw an error if there are no commits
-    logger.debug("git log output: %s", log_output)
-
-    if "does not have any commits yet" in log_output:
-        # Handle the case where the branch has no commits
-        logger.info("processing first commit...")
-        branch = extract_branch_from_error(log_output)
-        logger.debug("Found branch: %s", branch)
-        
-        return {
-            'status_message': f"Branch '{branch}' has no commits yet.",
-            'branch': branch
-            }
-        #return f"Branch '{branch}' has no commits yet."
-
-    # If commits exist, get the current branch name
-    branch = run_git_command(repo_path, [GIT_EXECUTABLE, "rev-parse", "--abbrev-ref", "HEAD"])
-
-    return {'branch':branch.strip(), 'status_message':''}
+    # symbolic-ref works for both unborn and populated branches. Never treat
+    # Git stderr (e.g. a safe.directory warning) as a branch name.
+    result = subprocess.run([GIT_EXECUTABLE, '-C', repo_path, 'symbolic-ref',
+                             '--quiet', '--short', 'HEAD'], capture_output=True, text=True)
+    if result.returncode:
+        return {'branch': None, 'status_message': 'Branch unavailable'}
+    return {'branch': result.stdout.strip(), 'status_message': ''}
 
 @app.route('/user/repos', methods=['POST'])
 def create_user_repos():
@@ -2996,6 +2982,12 @@ def process_tasks(tasks):
                     task_result['result'] = {'pr_merge': pr_merge(repo_path, **{key: params.get(key) for key in keys})}
             except Exception as exc:
                 task_result['error'] = str(exc)
+        elif action == 'repo_browse':
+            from repository_browse_git import branch_snapshot
+            try:
+                task_result['result'] = {'branch_snapshot': branch_snapshot(repo_path, params.get('branch'))}
+            except Exception:
+                task_result['error'] = 'Unable to read this branch. Check the server connection and refresh.'
         elif action == 'get_file':
             file_path = params.get('file_path')
             commit_sha = params.get('commit_sha', 'HEAD')
