@@ -1906,7 +1906,8 @@ def collect_server_metrics():
             "cpu_percent": cpu_percent,
             "memory_percent": memory.percent,
             "repo_count": len(REPOSITORIES),
-            "version": "1.0.0"  # Replace with __version__ or similar
+            "version": "1.0.0",
+            "additional_metrics": {"capabilities": ["guarded-ci-v1", "commit-evidence-v1"]}
         }
         print("Collected server metrics:", stats, flush=True)
         return stats
@@ -3070,6 +3071,29 @@ def process_tasks(tasks):
                 #results.append({"task_id": task['id'], "result": {"history": history}, "error": None})
                 task_result.update({"result": {"history": history}, "error": None})
         
+        elif action in ('get_commit_info', 'get_commit_diff') and params.get('account_api_read'):
+            from commit_read import read_commit
+            expected_path = params.get('repo_path')
+            if not expected_path or os.path.realpath(expected_path) != os.path.realpath(repo_path):
+                task_result.update({"error": "Repository path changed; refresh inventory."})
+            else:
+                try:
+                    evidence = read_commit(repo_path, params['commit_sha'], patch=action == 'get_commit_diff')
+                    task_result.update({"result": {"commit_evidence": evidence}})
+                except Exception:
+                    task_result.update({"error": "Commit evidence unavailable or too large."})
+
+        elif action == 'run_ci_guarded':
+            from guarded_ci import execute as execute_guarded_ci
+            expected_path = params.get('repo_path')
+            if not expected_path or os.path.realpath(expected_path) != os.path.realpath(repo_path):
+                task_result.update({"error": "Repository path changed; CI cancelled."})
+            else:
+                try:
+                    task_result.update({"result": execute_guarded_ci(repo_path, params)})
+                except Exception:
+                    task_result.update({"error": "CI guard rejected execution; verify checkout and configuration."})
+
         elif action == 'get_commit_diff':
             commit_sha = params.get('commit_sha')
             logger.debug(f"get_commit_diff params: repo={repo_name}, sha={commit_sha}")
