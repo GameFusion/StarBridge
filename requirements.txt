@@ -7,3 +7,4 @@ cryptography
 psutil
 watchdog
 pytest
+PyYAML==6.0.3
