@@ -3073,15 +3073,15 @@ def process_tasks(tasks):
         
         elif action in ('get_commit_info', 'get_commit_diff') and params.get('account_api_read'):
             from commit_read import read_commit
-            expected_path = params.get('repo_path')
-            if not expected_path or os.path.realpath(expected_path) != os.path.realpath(repo_path):
-                task_result.update({"error": "Repository path changed; refresh inventory."})
-            else:
-                try:
-                    evidence = read_commit(repo_path, params['commit_sha'], patch=action == 'get_commit_diff')
-                    task_result.update({"result": {"commit_evidence": evidence}})
-                except Exception:
-                    task_result.update({"error": "Commit evidence unavailable or too large."})
+            from pr_git import registered_repository
+            try:
+                # Older registrations omit the path. Resolve exactly one worker
+                # registration; supplied paths must still match that registration.
+                evidence_path = registered_repository(REPOSITORIES, repo_name, params.get('repo_path'))
+                evidence = read_commit(evidence_path, params['commit_sha'], patch=action == 'get_commit_diff')
+                task_result.update({"result": {"commit_evidence": evidence}})
+            except Exception:
+                task_result.update({"error": "Commit evidence unavailable; verify the unique repository registration, path and SHA."})
 
         elif action == 'run_ci_guarded':
             from guarded_ci import execute as execute_guarded_ci
